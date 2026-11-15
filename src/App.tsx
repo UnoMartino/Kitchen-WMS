@@ -17,7 +17,12 @@ import {
   IconSettings,
   IconSearch,
 } from './icons';
-import { scanVideoFrame, scanStaticImage } from './utils/ean13Decoder';
+import {
+  scanVideoFrame,
+  scanStaticImage,
+  normalizeScannedCode,
+  type NormalizedScanResult,
+} from './utils/ean13Decoder';
 import { getExpiryBadgeInfo } from './utils/dialogLightDismiss';
 import { ItemModal } from './components/ItemModal';
 import { ReprintModal } from './components/ReprintModal';
@@ -120,6 +125,9 @@ export function App() {
   const [cameraStatusText, setCameraStatusText] = useState('Kamera wyłączona');
   const [manualScanCode, setManualScanCode] = useState('');
   const [eanScannerTarget, setEanScannerTarget] = useState(false);
+  const [pendingDetectedCode, setPendingDetectedCode] = useState<NormalizedScanResult | null>(
+    null
+  );
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -250,10 +258,13 @@ export function App() {
       .then((d) => setCatalogSuggestions((d.items || []).slice(0, 6)))
       .catch(() => {});
 
-    // Check if URL path is /AAA-1111
+    // Check if URL path is /AAA-1111 or ?item=AAA-1111
     const match = window.location.pathname.match(/^\/([A-Za-z]{3}-\d{4})$/);
+    const queryItem = new URLSearchParams(window.location.search).get('item');
     if (match) {
       openItemBySerial(match[1].toUpperCase());
+    } else if (queryItem && /^[A-Za-z]{3}-\d{4}$/.test(queryItem.trim())) {
+      openItemBySerial(queryItem.trim().toUpperCase());
     }
   }, [fetchStatsAndSettings]);
 
@@ -394,20 +405,20 @@ export function App() {
 
   // Handle scanned or typed code (Serial AAA-1111, short serial 1..9999, or EAN)
   const handleCodeDetected = useCallback(
-    async (rawInput: string, forAddFormOnly = false) => {
+    async (rawInput: string) => {
       const cleaned = rawInput.trim();
       if (!cleaned) return;
 
       // 1. Extract AAA-1111 (or AAA-1) even if embedded in a URL
       const serialMatch = cleaned.toUpperCase().match(/([A-Z]{3})-?(\d{1,4})\b/);
-      if (serialMatch && !forAddFormOnly) {
+      if (serialMatch) {
         const normalizedSerial = `${serialMatch[1]}-${serialMatch[2].padStart(4, '0')}`;
         await openItemBySerial(normalizedSerial);
         return;
       }
 
       // 2. Short numeric serial suffix (e.g. "1" -> "AAA-0001")
-      if (/^\d{1,4}$/.test(cleaned) && !forAddFormOnly) {
+      if (/^\d{1,4}$/.test(cleaned)) {
         const numVal = parseInt(cleaned, 10);
         if (numVal >= 1 && numVal <= 9999) {
           const normalizedSerial = `AAA-${String(numVal).padStart(4, '0')}`;
@@ -471,6 +482,7 @@ export function App() {
   const startCamera = useCallback(
     async (forEanInAdd = false) => {
       setEanScannerTarget(forEanInAdd);
+      setPendingDetectedCode(null);
       if (forEanInAdd) {
         setCurrentView('scanner');
       }
@@ -528,6 +540,9 @@ export function App() {
 
         const offscreen = document.createElement('canvas');
         let busy = false;
+        let candidateCode = '';
+        let candidateHits = 0;
+        let lastCandidateTime = 0;
 
         const tick = () => {
           const video = videoRef.current;
@@ -539,8 +554,29 @@ export function App() {
               .then((detected) => {
                 busy = false;
                 if (detected && streamRef.current) {
-                  stopCamera();
-                  handleCodeDetected(detected, forEanInAdd);
+                  const normalized = normalizeScannedCode(detected);
+                  if (normalized) {
+                    const now = Date.now();
+                    if (normalized.code === candidateCode && now - lastCandidateTime < 1500) {
+                      candidateHits += 1;
+                    } else {
+                      candidateCode = normalized.code;
+                      candidateHits = 1;
+                    }
+                    lastCandidateTime = now;
+
+                    // Multi-frame verification: require 2 consecutive hits for QR, 3 for 1D EAN
+                    const requiredFrames = normalized.kind === 'serial' ? 2 : 3;
+                    if (candidateHits >= requiredFrames) {
+                      stopCamera();
+                      setPendingDetectedCode(normalized);
+                      setCameraStatusText(
+                        normalized.kind === 'serial'
+                          ? `Wykryto kod QR: ${normalized.code} — potwierdź poniżej`
+                          : `Wykryto kod EAN: ${normalized.code} — potwierdź poniżej`
+                      );
+                    }
+                  }
                 }
               })
               .catch(() => {
@@ -559,7 +595,7 @@ export function App() {
         );
       }
     },
-    [stopCamera, handleCodeDetected]
+    [stopCamera]
   );
 
   // Auto-start camera when entering scanner view, stop when leaving
@@ -574,6 +610,7 @@ export function App() {
       }
     } else {
       stopCamera();
+      setPendingDetectedCode(null);
     }
     return () => {
       stopCamera();
@@ -581,7 +618,7 @@ export function App() {
   }, [currentView, eanScannerTarget, startCamera, stopCamera]);
 
   // Decode from photo file (iOS HTTP fallback & high-res photo decoder)
-  const handlePhotoCapture = (e: React.ChangeEvent<HTMLInputElement>, forAddFormOnly = false) => {
+  const handlePhotoCapture = (e: React.ChangeEvent<HTMLInputElement>, fromAddTab = false) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
@@ -594,8 +631,21 @@ export function App() {
         const detected = await scanStaticImage(img);
         URL.revokeObjectURL(url);
         if (detected) {
-          await handleCodeDetected(detected, forAddFormOnly);
-          return;
+          const normalized = normalizeScannedCode(detected);
+          if (normalized) {
+            if (currentView === 'scanner' || !fromAddTab) {
+              stopCamera();
+              setPendingDetectedCode(normalized);
+              setCameraStatusText(
+                normalized.kind === 'serial'
+                  ? `Wykryto kod QR: ${normalized.code} — potwierdź poniżej`
+                  : `Wykryto kod EAN: ${normalized.code} — potwierdź poniżej`
+              );
+              return;
+            }
+            await handleCodeDetected(normalized.code);
+            return;
+          }
         }
         showToast(
           'Nie udało się odczytać kodu ze zdjęcia. Zbliż aparat do kodu lub wpisz go ręcznie.'
@@ -1283,6 +1333,55 @@ export function App() {
                     )}
                   </div>
 
+                  {pendingDetectedCode && (
+                    <div
+                      className="scanner-confirm-banner"
+                      role="status"
+                      aria-live="polite"
+                    >
+                      <div className="scanner-confirm-info">
+                        <span className="scanner-confirm-label">
+                          {pendingDetectedCode.kind === 'serial'
+                            ? 'Wykryto etykietę magazynową QR'
+                            : 'Wykryto kod kreskowy EAN'}
+                        </span>
+                        <span className="serial-chip large">{pendingDetectedCode.code}</span>
+                      </div>
+                      <div className="scanner-confirm-actions">
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          onClick={() => {
+                            const codeToOpen = pendingDetectedCode.code;
+                            setPendingDetectedCode(null);
+                            handleCodeDetected(codeToOpen);
+                          }}
+                        >
+                          {pendingDetectedCode.kind === 'serial'
+                            ? `Potwierdź i otwórz (${pendingDetectedCode.code})`
+                            : `Potwierdź i użyj EAN (${pendingDetectedCode.code})`}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() => {
+                            setPendingDetectedCode(null);
+                            if (
+                              navigator.mediaDevices &&
+                              typeof navigator.mediaDevices.getUserMedia === 'function'
+                            ) {
+                              startCamera(eanScannerTarget);
+                            } else {
+                              setCameraStatusText('Kamera wyłączona');
+                            }
+                          }}
+                        >
+                          Odrzuć i skanuj dalej
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="scanner-controls">
                     {!cameraActive ? (
                       <button
@@ -1320,7 +1419,7 @@ export function App() {
                       accept="image/*"
                       capture="environment"
                       style={{ display: 'none' }}
-                      onChange={(e) => handlePhotoCapture(e, eanScannerTarget)}
+                      onChange={(e) => handlePhotoCapture(e, false)}
                     />
                   </div>
                 </div>
@@ -1335,7 +1434,7 @@ export function App() {
                     className="manual-lookup-row"
                     onSubmit={(e) => {
                       e.preventDefault();
-                      handleCodeDetected(manualScanCode, eanScannerTarget);
+                      handleCodeDetected(manualScanCode);
                     }}
                   >
                     <input

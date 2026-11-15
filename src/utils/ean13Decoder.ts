@@ -1,8 +1,14 @@
 // ============================================================================
-// Pure TypeScript 1D EAN-13 / EAN-8 / UPC-A Barcode Decoder
-// Uses run-length pattern matching (immune to cumulative module drift)
-// Supports horizontal, vertical (90 deg), and upside-down (180 deg) barcodes
+// Pure TypeScript 1D EAN-13 / EAN-8 / UPC-A Barcode & QR Code Decoder
+// Hardened against false positives:
+// - Local contrast gate (ignores flat / low-contrast surfaces)
+// - Left & right quiet-zone verification
+// - Global module-width consistency across all guards and digits
+// - Strict RLE pattern variance threshold + Modulo-10 checksum
+// - Multi-scanline consensus (requires >= 3 distinct scanlines to match)
 // ============================================================================
+
+import jsQR from 'jsqr';
 
 const L_AND_R_PATTERNS: number[][] = [
   [3, 2, 1, 1], // 0
@@ -37,6 +43,7 @@ export function validateEanChecksum(digits: number[]): boolean {
   let sum = 0;
   for (let i = 0; i < digits.length - 1; i++) {
     const d = digits[i];
+    if (d < 0 || d > 9 || !Number.isInteger(d)) return false;
     const weight = digits.length === 13 ? (i % 2 === 0 ? 1 : 3) : i % 2 === 0 ? 3 : 1;
     sum += d * weight;
   }
@@ -44,10 +51,48 @@ export function validateEanChecksum(digits: number[]): boolean {
   return check === digits[digits.length - 1];
 }
 
+export interface NormalizedScanResult {
+  code: string;
+  kind: 'serial' | 'ean';
+}
+
+/**
+ * Validates and normalizes a raw decoded string from camera/photo.
+ * Rejects arbitrary strings or numbers without a valid EAN checksum.
+ */
+export function normalizeScannedCode(raw: string): NormalizedScanResult | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  // 1. Kitchen serial number AAA-1111 (standalone or inside URL ?item=AAA-1111 or /AAA-1111)
+  const serialMatch = trimmed.toUpperCase().match(/(?:^|[/?=&\s])([A-Z]{3})-(\d{4})(?:$|[/?&#\s])/);
+  if (serialMatch) {
+    return {
+      code: `${serialMatch[1]}-${serialMatch[2]}`,
+      kind: 'serial',
+    };
+  }
+
+  // 2. EAN-13, UPC-A (12 digits), or EAN-8 with valid Modulo-10 checksum
+  if (/^\d{8}$/.test(trimmed) || /^\d{12,13}$/.test(trimmed)) {
+    const normalizedDigitsStr = trimmed.length === 12 ? `0${trimmed}` : trimmed;
+    const digits = normalizedDigitsStr.split('').map((ch) => Number(ch));
+    if (validateEanChecksum(digits)) {
+      return {
+        code: normalizedDigitsStr,
+        kind: 'ean',
+      };
+    }
+  }
+
+  return null;
+}
+
 function patternMatchVariance(
   counters: number[],
   pattern: number[],
-  maxIndividualVariance = 0.75
+  maxIndividualVariance = 0.48
 ): number {
   const numCounters = counters.length;
   let total = 0;
@@ -79,7 +124,7 @@ function decodeDigitRLE(
   counters: number[],
   includeG: boolean
 ): { digit: number; isG: boolean; variance: number } | null {
-  let bestVariance = 0.52;
+  let bestVariance = 0.30;
   let bestDigit = -1;
   let bestIsG = false;
 
@@ -128,22 +173,45 @@ function extractRuns(bin: Uint8Array): Run[] {
 }
 
 function tryDecodeEan13FromRuns(runs: Run[]): string | null {
-  // Complete EAN-13 requires 59 runs starting at a black bar (val === 1)
-  if (runs.length < 59) return null;
+  // Complete EAN-13 requires 59 barcode runs surrounded by left and right white quiet zones
+  if (runs.length < 61) return null;
 
-  for (let start = 0; start <= runs.length - 59; start++) {
+  for (let start = 1; start <= runs.length - 60; start++) {
     if (runs[start].val !== 1) continue;
 
-    // 1. Check Left Guard (101 -> [1, 1, 1])
+    // Total width across all 59 runs (95 modules)
+    let totalWidth = 0;
+    for (let k = 0; k < 59; k++) {
+      totalWidth += runs[start + k].len;
+    }
+    if (totalWidth < 95) continue;
+    const moduleWidth = totalWidth / 95;
+
+    // Quiet zone check: white runs immediately before Left Guard and after Right Guard
+    const leftQuiet = runs[start - 1];
+    const rightQuiet = runs[start + 59];
+    if (leftQuiet.val !== 0 || leftQuiet.len < moduleWidth * 3.5) continue;
+    if (rightQuiet.val !== 0 || rightQuiet.len < moduleWidth * 3.5) continue;
+
+    // 1. Check Left Guard (101 -> [1, 1, 1], expected 3 modules)
+    const lgWidth = runs[start].len + runs[start + 1].len + runs[start + 2].len;
+    if (lgWidth < moduleWidth * 1.9 || lgWidth > moduleWidth * 4.3) continue;
     const lgVar = patternMatchVariance(
       [runs[start].len, runs[start + 1].len, runs[start + 2].len],
       [1, 1, 1],
-      0.85
+      0.5
     );
-    if (lgVar > 0.55) continue;
+    if (lgVar > 0.32) continue;
 
-    // 2. Check Center Guard (01010 -> [1, 1, 1, 1, 1] at start + 27)
+    // 2. Check Center Guard (01010 -> [1, 1, 1, 1, 1] at start + 27, expected 5 modules)
     const cgIdx = start + 27;
+    const cgWidth =
+      runs[cgIdx].len +
+      runs[cgIdx + 1].len +
+      runs[cgIdx + 2].len +
+      runs[cgIdx + 3].len +
+      runs[cgIdx + 4].len;
+    if (cgWidth < moduleWidth * 3.3 || cgWidth > moduleWidth * 6.8) continue;
     const cgVar = patternMatchVariance(
       [
         runs[cgIdx].len,
@@ -153,55 +221,77 @@ function tryDecodeEan13FromRuns(runs: Run[]): string | null {
         runs[cgIdx + 4].len,
       ],
       [1, 1, 1, 1, 1],
-      0.85
+      0.5
     );
-    if (cgVar > 0.55) continue;
+    if (cgVar > 0.32) continue;
 
-    // 3. Check Right Guard (101 -> [1, 1, 1] at start + 56)
+    // 3. Check Right Guard (101 -> [1, 1, 1] at start + 56, expected 3 modules)
     const rgIdx = start + 56;
+    const rgWidth = runs[rgIdx].len + runs[rgIdx + 1].len + runs[rgIdx + 2].len;
+    if (rgWidth < moduleWidth * 1.9 || rgWidth > moduleWidth * 4.3) continue;
     const rgVar = patternMatchVariance(
       [runs[rgIdx].len, runs[rgIdx + 1].len, runs[rgIdx + 2].len],
       [1, 1, 1],
-      0.85
+      0.5
     );
-    if (rgVar > 0.55) continue;
+    if (rgVar > 0.32) continue;
 
-    // 4. Decode 6 left digits (L or G)
+    // 4. Decode 6 left digits (L or G), verifying consistent 7-module digit width
     let parity = '';
     const digits: number[] = [];
     let ok = true;
+    let totalDigitVariance = 0;
+    const minDigitWidth = moduleWidth * 5.2;
+    const maxDigitWidth = moduleWidth * 8.8;
 
     for (let d = 0; d < 6; d++) {
       const idx = start + 3 + d * 4;
-      const decoded = decodeDigitRLE(
-        [runs[idx].len, runs[idx + 1].len, runs[idx + 2].len, runs[idx + 3].len],
-        true
-      );
+      const c0 = runs[idx].len;
+      const c1 = runs[idx + 1].len;
+      const c2 = runs[idx + 2].len;
+      const c3 = runs[idx + 3].len;
+      const dWidth = c0 + c1 + c2 + c3;
+      if (dWidth < minDigitWidth || dWidth > maxDigitWidth) {
+        ok = false;
+        break;
+      }
+      const decoded = decodeDigitRLE([c0, c1, c2, c3], true);
       if (!decoded) {
         ok = false;
         break;
       }
       parity += decoded.isG ? 'G' : 'L';
       digits.push(decoded.digit);
+      totalDigitVariance += decoded.variance;
     }
     if (!ok || PARITY_MAP[parity] === undefined) continue;
     digits.unshift(PARITY_MAP[parity]);
 
-    // 5. Decode 6 right digits (R only)
+    // 5. Decode 6 right digits (R only), verifying consistent 7-module digit width
     for (let d = 0; d < 6; d++) {
       const idx = start + 32 + d * 4;
-      const decoded = decodeDigitRLE(
-        [runs[idx].len, runs[idx + 1].len, runs[idx + 2].len, runs[idx + 3].len],
-        false
-      );
+      const c0 = runs[idx].len;
+      const c1 = runs[idx + 1].len;
+      const c2 = runs[idx + 2].len;
+      const c3 = runs[idx + 3].len;
+      const dWidth = c0 + c1 + c2 + c3;
+      if (dWidth < minDigitWidth || dWidth > maxDigitWidth) {
+        ok = false;
+        break;
+      }
+      const decoded = decodeDigitRLE([c0, c1, c2, c3], false);
       if (!decoded) {
         ok = false;
         break;
       }
       digits.push(decoded.digit);
+      totalDigitVariance += decoded.variance;
     }
 
-    if (ok && validateEanChecksum(digits)) {
+    if (!ok) continue;
+    if (totalDigitVariance / 12 > 0.21) continue;
+
+    if (validateEanChecksum(digits)) {
       return digits.join('');
     }
   }
@@ -209,20 +299,43 @@ function tryDecodeEan13FromRuns(runs: Run[]): string | null {
 }
 
 function tryDecodeEan8FromRuns(runs: Run[]): string | null {
-  // Complete EAN-8 requires 43 runs starting at a black bar (val === 1)
-  if (runs.length < 43) return null;
+  // Complete EAN-8 requires 43 barcode runs surrounded by left and right white quiet zones
+  if (runs.length < 45) return null;
 
-  for (let start = 0; start <= runs.length - 43; start++) {
+  for (let start = 1; start <= runs.length - 44; start++) {
     if (runs[start].val !== 1) continue;
 
+    // Total width across all 43 runs (67 modules)
+    let totalWidth = 0;
+    for (let k = 0; k < 43; k++) {
+      totalWidth += runs[start + k].len;
+    }
+    if (totalWidth < 67) continue;
+    const moduleWidth = totalWidth / 67;
+
+    // Quiet zone check
+    const leftQuiet = runs[start - 1];
+    const rightQuiet = runs[start + 43];
+    if (leftQuiet.val !== 0 || leftQuiet.len < moduleWidth * 3.5) continue;
+    if (rightQuiet.val !== 0 || rightQuiet.len < moduleWidth * 3.5) continue;
+
+    const lgWidth = runs[start].len + runs[start + 1].len + runs[start + 2].len;
+    if (lgWidth < moduleWidth * 1.9 || lgWidth > moduleWidth * 4.3) continue;
     const lgVar = patternMatchVariance(
       [runs[start].len, runs[start + 1].len, runs[start + 2].len],
       [1, 1, 1],
-      0.8
+      0.5
     );
-    if (lgVar > 0.5) continue;
+    if (lgVar > 0.30) continue;
 
     const cgIdx = start + 19;
+    const cgWidth =
+      runs[cgIdx].len +
+      runs[cgIdx + 1].len +
+      runs[cgIdx + 2].len +
+      runs[cgIdx + 3].len +
+      runs[cgIdx + 4].len;
+    if (cgWidth < moduleWidth * 3.3 || cgWidth > moduleWidth * 6.8) continue;
     const cgVar = patternMatchVariance(
       [
         runs[cgIdx].len,
@@ -232,49 +345,71 @@ function tryDecodeEan8FromRuns(runs: Run[]): string | null {
         runs[cgIdx + 4].len,
       ],
       [1, 1, 1, 1, 1],
-      0.8
+      0.5
     );
-    if (cgVar > 0.5) continue;
+    if (cgVar > 0.30) continue;
 
     const rgIdx = start + 40;
+    const rgWidth = runs[rgIdx].len + runs[rgIdx + 1].len + runs[rgIdx + 2].len;
+    if (rgWidth < moduleWidth * 1.9 || rgWidth > moduleWidth * 4.3) continue;
     const rgVar = patternMatchVariance(
       [runs[rgIdx].len, runs[rgIdx + 1].len, runs[rgIdx + 2].len],
       [1, 1, 1],
-      0.8
+      0.5
     );
-    if (rgVar > 0.5) continue;
+    if (rgVar > 0.30) continue;
 
     const digits: number[] = [];
     let ok = true;
+    let totalDigitVariance = 0;
+    const minDigitWidth = moduleWidth * 5.2;
+    const maxDigitWidth = moduleWidth * 8.8;
 
     for (let d = 0; d < 4; d++) {
       const idx = start + 3 + d * 4;
-      const decoded = decodeDigitRLE(
-        [runs[idx].len, runs[idx + 1].len, runs[idx + 2].len, runs[idx + 3].len],
-        false
-      );
+      const c0 = runs[idx].len;
+      const c1 = runs[idx + 1].len;
+      const c2 = runs[idx + 2].len;
+      const c3 = runs[idx + 3].len;
+      const dWidth = c0 + c1 + c2 + c3;
+      if (dWidth < minDigitWidth || dWidth > maxDigitWidth) {
+        ok = false;
+        break;
+      }
+      const decoded = decodeDigitRLE([c0, c1, c2, c3], false);
       if (!decoded) {
         ok = false;
         break;
       }
       digits.push(decoded.digit);
+      totalDigitVariance += decoded.variance;
     }
     if (!ok) continue;
 
     for (let d = 0; d < 4; d++) {
       const idx = start + 24 + d * 4;
-      const decoded = decodeDigitRLE(
-        [runs[idx].len, runs[idx + 1].len, runs[idx + 2].len, runs[idx + 3].len],
-        false
-      );
+      const c0 = runs[idx].len;
+      const c1 = runs[idx + 1].len;
+      const c2 = runs[idx + 2].len;
+      const c3 = runs[idx + 3].len;
+      const dWidth = c0 + c1 + c2 + c3;
+      if (dWidth < minDigitWidth || dWidth > maxDigitWidth) {
+        ok = false;
+        break;
+      }
+      const decoded = decodeDigitRLE([c0, c1, c2, c3], false);
       if (!decoded) {
         ok = false;
         break;
       }
       digits.push(decoded.digit);
+      totalDigitVariance += decoded.variance;
     }
 
-    if (ok && validateEanChecksum(digits)) {
+    if (!ok) continue;
+    if (totalDigitVariance / 8 > 0.20) continue;
+
+    if (validateEanChecksum(digits)) {
       return digits.join('');
     }
   }
@@ -292,17 +427,28 @@ function binarizeCentered(grayRow: Uint8Array, radius: number, bias: number): Ui
     const left = Math.max(0, i - radius);
     const right = Math.min(len - 1, i + radius);
     const avg = (prefix[right + 1] - prefix[left]) / (right - left + 1);
-    bin[i] = grayRow[i] < avg * bias ? 1 : 0;
+    // Require pixel to be meaningfully darker than local mean so uniform/quiet zones stay 0
+    bin[i] = grayRow[i] < avg * bias && avg - grayRow[i] >= 6 ? 1 : 0;
   }
   return bin;
 }
 
 function decodeGrayLine(grayLine: Uint8Array): string | null {
   const len = grayLine.length;
-  if (len < 95) return null;
+  if (len < 110) return null;
 
-  const radii = [Math.max(12, Math.floor(len / 24)), Math.max(24, Math.floor(len / 12))];
-  const biases = [0.97, 0.92, 1.0];
+  // Reject low-contrast lines (e.g. uniform wall, table, blank surface)
+  let minVal = 255;
+  let maxVal = 0;
+  for (let i = 0; i < len; i++) {
+    const v = grayLine[i];
+    if (v < minVal) minVal = v;
+    if (v > maxVal) maxVal = v;
+  }
+  if (maxVal - minVal < 55) return null;
+
+  const radii = [Math.max(14, Math.floor(len / 20)), Math.max(28, Math.floor(len / 10))];
+  const biases = [0.95, 0.90];
 
   for (const radius of radii) {
     for (const bias of biases) {
@@ -328,9 +474,11 @@ function decodeGrayLine(grayLine: Uint8Array): string | null {
   return null;
 }
 
+const MIN_SCANLINE_VOTES = 3;
+
 export function decodeEanFromImageData(imageData: ImageData): string | null {
   const { data, width, height } = imageData;
-  if (width < 60 || height < 60) return null;
+  if (width < 110 || height < 60) return null;
 
   // Scan 19 horizontal lines across the frame
   const ratios = [
@@ -351,31 +499,30 @@ export function decodeEanFromImageData(imageData: ImageData): string | null {
     const code = decodeGrayLine(grayRow);
     if (code) {
       votes[code] = (votes[code] || 0) + 1;
-      if (votes[code] >= 2) return code;
+      if (votes[code] >= MIN_SCANLINE_VOTES) return code;
     }
   }
 
   // Also scan vertical columns (for barcodes held vertically / 90 deg on mobile)
-  for (const ratio of ratios) {
-    const x = Math.floor(width * ratio);
-    if (x < 0 || x >= width) continue;
-    const grayCol = new Uint8Array(height);
-    for (let y = 0; y < height; y++) {
-      const idx = (y * width + x) * 4;
-      grayCol[y] = (data[idx] * 77 + data[idx + 1] * 150 + data[idx + 2] * 29) >> 8;
-    }
-    const code = decodeGrayLine(grayCol);
-    if (code) {
-      votes[code] = (votes[code] || 0) + 1;
-      if (votes[code] >= 2) return code;
+  if (height >= 110) {
+    for (const ratio of ratios) {
+      const x = Math.floor(width * ratio);
+      if (x < 0 || x >= width) continue;
+      const grayCol = new Uint8Array(height);
+      for (let y = 0; y < height; y++) {
+        const idx = (y * width + x) * 4;
+        grayCol[y] = (data[idx] * 77 + data[idx + 1] * 150 + data[idx + 2] * 29) >> 8;
+      }
+      const code = decodeGrayLine(grayCol);
+      if (code) {
+        votes[code] = (votes[code] || 0) + 1;
+        if (votes[code] >= MIN_SCANLINE_VOTES) return code;
+      }
     }
   }
 
-  const best = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
-  return best ? best[0] : null;
+  return null;
 }
-
-import jsQR from 'jsqr';
 
 interface BarcodeDetectorLike {
   detect(
@@ -398,7 +545,7 @@ function getNativeBarcodeDetector(): BarcodeDetectorLike | null {
   if (typeof window !== 'undefined' && typeof window.BarcodeDetector === 'function') {
     try {
       cachedDetector = new window.BarcodeDetector({
-        formats: ['qr_code', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'],
+        formats: ['qr_code', 'ean_13', 'ean_8', 'upc_a'],
       });
       return cachedDetector;
     } catch {
@@ -416,15 +563,21 @@ function getNativeBarcodeDetector(): BarcodeDetectorLike | null {
 
 export function decodeFromImageData(imageData: ImageData): string | null {
   const qr = jsQR(imageData.data, imageData.width, imageData.height, {
-    inversionAttempts: 'attemptBoth',
+    inversionAttempts: 'dontInvert',
   });
-  if (qr && qr.data && qr.data.trim()) {
-    return qr.data.trim();
+  if (qr && qr.data) {
+    const normalizedQr = normalizeScannedCode(qr.data);
+    if (normalizedQr) {
+      return normalizedQr.code;
+    }
   }
 
   const ean = decodeEanFromImageData(imageData);
   if (ean) {
-    return ean;
+    const normalizedEan = normalizeScannedCode(ean);
+    if (normalizedEan) {
+      return normalizedEan.code;
+    }
   }
 
   return null;
@@ -438,13 +591,18 @@ export async function scanVideoFrame(
   const vh = video.videoHeight;
   if (!vw || !vh) return null;
 
-  // 1. Try native BarcodeDetector if available
+  // 1. Try native BarcodeDetector if available, strictly filtered through normalizeScannedCode
   const detector = getNativeBarcodeDetector();
   if (detector) {
     try {
       const results = await detector.detect(video);
-      if (results && results.length > 0 && results[0].rawValue) {
-        return results[0].rawValue.trim();
+      if (results && results.length > 0) {
+        for (const r of results) {
+          if (r.rawValue) {
+            const valid = normalizeScannedCode(r.rawValue);
+            if (valid) return valid.code;
+          }
+        }
       }
     } catch {
       // fall through to canvas decoding
@@ -488,13 +646,18 @@ export async function scanStaticImage(img: HTMLImageElement): Promise<string | n
   const ih = img.naturalHeight || img.height;
   if (!iw || !ih) return null;
 
-  // 1. Try native BarcodeDetector first
+  // 1. Try native BarcodeDetector first, strictly filtered through normalizeScannedCode
   const detector = getNativeBarcodeDetector();
   if (detector) {
     try {
       const results = await detector.detect(img);
-      if (results && results.length > 0 && results[0].rawValue) {
-        return results[0].rawValue.trim();
+      if (results && results.length > 0) {
+        for (const r of results) {
+          if (r.rawValue) {
+            const valid = normalizeScannedCode(r.rawValue);
+            if (valid) return valid.code;
+          }
+        }
       }
     } catch {
       // fall through
