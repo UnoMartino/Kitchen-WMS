@@ -10,7 +10,7 @@ interface SettingsModalProps {
   onSaveSettings: (patch: Partial<AppSettings>) => Promise<void>;
   onTestPrinter: (printerConfig: Partial<AppSettings>) => Promise<void>;
   onRestoreActivity: (activityId: number) => Promise<void>;
-  onReprintSerial: (serial: string) => void;
+  onReprintSerial: (serial: string, itemName?: string) => void;
 }
 
 export function SettingsModal({
@@ -130,6 +130,7 @@ export function SettingsModal({
     consumed: 'Zużyto',
     deleted: 'Usunięto',
     opened: 'Otwarto',
+    closed: 'Zamknięto',
     updated: 'Edytowano',
     printed: 'Wydrukowano QR',
     restored: 'Przywrócono'
@@ -410,9 +411,9 @@ export function SettingsModal({
                               <button
                                 type="button"
                                 className="chip-btn"
-                                onClick={() => onReprintSerial(row.serial_number)}
+                                onClick={() => onReprintSerial(row.serial_number, row.item_name)}
                               >
-                                Dodrukuj QR
+                                Dodrukuj etykietę
                               </button>
                             )}
                             {canRestore && (
@@ -453,7 +454,7 @@ export function SettingsModal({
               className={`seg-btn ${activeTab === 'taxonomy' ? 'active' : ''}`}
               onClick={() => setActiveTab('taxonomy')}
             >
-              Słowniki
+              Lokalizacje i kategorie
             </button>
             <button
               type="button"

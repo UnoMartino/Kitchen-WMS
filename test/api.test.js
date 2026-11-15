@@ -199,6 +199,47 @@ async function runTests() {
     assert.equal(restoreRes.ok, true);
     assert.equal(restoreRes.item.serial_number, 'AAA-0001');
 
+    const closeRes = await fetch(`${baseUrl}/api/items/by-serial/AAA-0001`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'close' })
+    }).then((r) => r.json());
+    assert.equal(closeRes.ok, true);
+    assert.equal(closeRes.item.is_opened, false);
+    assert.equal(closeRes.item.opened_at, null);
+
+    const openAgainRes = await fetch(`${baseUrl}/api/items/by-serial/AAA-0001`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'open' })
+    }).then((r) => r.json());
+    assert.equal(openAgainRes.ok, true);
+    assert.equal(openAgainRes.item.is_opened, true);
+    assert.ok(openAgainRes.item.opened_at);
+    assert.equal(openAgainRes.item.expiry_date, closeRes.item.expiry_date);
+    assert.equal(openAgainRes.item.effective_expiry_date, closeRes.item.effective_expiry_date);
+    assert.equal(openAgainRes.item.days_remaining, closeRes.item.days_remaining);
+
+    const noExpiryRes = await fetch(`${baseUrl}/api/items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Sól kamienna',
+        category: 'Przyprawy',
+        location: 'Spiżarnia',
+        expiry_date: null,
+        quantity: 1,
+        unit: 'op.',
+        auto_print: false
+      })
+    }).then((r) => r.json());
+    assert.equal(noExpiryRes.ok, true);
+    assert.equal(noExpiryRes.count, 1);
+    assert.equal(noExpiryRes.items[0].expiry_date, null);
+    assert.equal(noExpiryRes.items[0].effective_expiry_date, null);
+    assert.equal(noExpiryRes.items[0].days_remaining, null);
+    assert.equal(noExpiryRes.items[0].expiry_status, 'none');
+
     console.log('9. Testowanie usunięcia zakładki/endpointu Składniki oraz serwowania frontendu Vite...');
     const removedIngredientsRes = await fetch(`${baseUrl}/api/ingredients/check`, {
       method: 'POST'

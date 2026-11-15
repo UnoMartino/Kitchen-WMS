@@ -5,8 +5,6 @@ import type {
   StatsResponse,
   AppSettings,
   ActivityEntry,
-  CatalogProduct,
-  LabelStickerItem,
 } from './types';
 import {
   IconBox,
@@ -27,7 +25,10 @@ import { getExpiryBadgeInfo } from './utils/dialogLightDismiss';
 import { ItemModal } from './components/ItemModal';
 import { ReprintModal } from './components/ReprintModal';
 import { SettingsModal } from './components/SettingsModal';
-import { LabelsPreviewModal } from './components/LabelsPreviewModal';
+import {
+  ConfirmPrintModal,
+  type PrintConfirmationRequest,
+} from './components/ConfirmPrintModal';
 
 const DEFAULT_LOCATIONS = ['Lodówka', 'Zamrażarka', 'Spiżarnia', 'Szafka', 'Piwnica'];
 const DEFAULT_CATEGORIES = [
@@ -87,7 +88,6 @@ export function App() {
   });
 
   const [activityLog, setActivityLog] = useState<ActivityEntry[]>([]);
-  const [catalogSuggestions, setCatalogSuggestions] = useState<CatalogProduct[]>([]);
 
   // Filters
   const [searchQuery, setSearchQuery] = useState('');
@@ -106,6 +106,7 @@ export function App() {
   const [addQuantity, setAddQuantity] = useState('1');
   const [addUnit, setAddUnit] = useState('szt.');
   const [addExpiryDate, setAddExpiryDate] = useState('');
+  const [addNoExpiry, setAddNoExpiry] = useState(false);
   const [addLabelsCount, setAddLabelsCount] = useState('1');
   const [addNotes, setAddNotes] = useState('');
   const [addAutoPrint, setAddAutoPrint] = useState(true);
@@ -117,8 +118,8 @@ export function App() {
   const [reprintOpen, setReprintOpen] = useState(false);
   const [reprintInitialSerials, setReprintInitialSerials] = useState<string[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [previewItems, setPreviewItems] = useState<LabelStickerItem[]>([]);
-  const [previewSummaryText, setPreviewSummaryText] = useState<string>('');
+  const [confirmPrintRequest, setConfirmPrintRequest] =
+    useState<PrintConfirmationRequest | null>(null);
 
   // Scanner state
   const [cameraActive, setCameraActive] = useState(false);
@@ -142,20 +143,64 @@ export function App() {
     actionLabel?: string;
     onAction?: () => void;
   } | null>(null);
+  const toastRef = useRef<HTMLDivElement | null>(null);
   const toastTimerRef = useRef<number | null>(null);
+  const toastPausedRef = useRef(false);
+  const supportsPopover =
+    typeof HTMLElement !== 'undefined' && Object.hasOwn(HTMLElement.prototype, 'popover');
+
+  const scheduleToastDismiss = useCallback(() => {
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+    if (toastPausedRef.current) return;
+    toastTimerRef.current = window.setTimeout(() => {
+      const toastEl = toastRef.current;
+      if (toastEl && toastEl.matches(':focus-within')) {
+        toastPausedRef.current = true;
+        return;
+      }
+      setToast(null);
+    }, 4500);
+  }, []);
 
   const showToast = useCallback(
     (message: string, actionLabel?: string, onAction?: () => void) => {
-      if (toastTimerRef.current) {
-        window.clearTimeout(toastTimerRef.current);
-      }
+      toastPausedRef.current = false;
       setToast({ message, actionLabel, onAction });
-      toastTimerRef.current = window.setTimeout(() => {
-        setToast(null);
-      }, 4500);
+      scheduleToastDismiss();
+      const docWithAriaNotify = document as Document & {
+        ariaNotify?: (text: string) => void;
+      };
+      if (typeof docWithAriaNotify.ariaNotify === 'function') {
+        docWithAriaNotify.ariaNotify(actionLabel ? `${message}. Dostępne akcje.` : message);
+      }
     },
-    []
+    [scheduleToastDismiss]
   );
+
+  useEffect(() => {
+    const el = toastRef.current;
+    if (!el || !supportsPopover) return;
+    if (toast) {
+      try {
+        if (!el.matches(':popover-open')) {
+          el.showPopover();
+        }
+      } catch {
+        // ignore if already open or detached
+      }
+    } else {
+      try {
+        if (el.matches(':popover-open')) {
+          el.hidePopover();
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }, [toast, supportsPopover]);
 
   // Sync iOS Safari theme-color, root background, and standalone PWA / iOS device classes
   useEffect(() => {
@@ -293,10 +338,6 @@ export function App() {
 
   useEffect(() => {
     fetchStatsAndSettings();
-    fetch('/api/catalog')
-      .then((r) => r.json())
-      .then((d) => setCatalogSuggestions((d.items || []).slice(0, 6)))
-      .catch(() => {});
 
     // Check if URL path is /AAA-1111 or ?item=AAA-1111
     const match = window.location.pathname.match(/^\/([A-Za-z]{3}-\d{4})$/);
@@ -423,6 +464,7 @@ export function App() {
           if (shelfDays) {
             const d = new Date();
             d.setDate(d.getDate() + Number(shelfDays));
+            setAddNoExpiry(false);
             setAddExpiryDate(d.toISOString().slice(0, 10));
           }
           const sourceLabel =
@@ -744,7 +786,7 @@ export function App() {
           location: addLocation,
           quantity: Number(addQuantity) || 1,
           unit: addUnit.trim() || 'szt.',
-          expiry_date: addExpiryDate || null,
+          expiry_date: addNoExpiry ? null : addExpiryDate || null,
           batch_count: Math.max(1, Math.min(50, Number(addLabelsCount) || 1)),
           notes: addNotes.trim(),
           auto_print: addAutoPrint,
@@ -763,7 +805,7 @@ export function App() {
       showToast(
         printedOk
           ? `Dodano i wydrukowano: ${serials}`
-          : `Dodano: ${serials} (podgląd etykiety gotowy)`
+          : `Dodano produkt: ${serials}`
       );
 
       // Reset form
@@ -774,19 +816,11 @@ export function App() {
       setAddQuantity('1');
       setAddUnit('szt.');
       setAddExpiryDate('');
+      setAddNoExpiry(false);
       setAddLabelsCount('1');
       setAddNotes('');
 
       refreshAll();
-      if (created.length > 0) {
-        const stickers: LabelStickerItem[] = created.map((c) => ({
-          serial_number: c.serial_number,
-          name: c.name,
-          qr_svg: c.qr_svg || '',
-        }));
-        setPreviewSummaryText(`Wygenerowano etykiety dla: ${serials}`);
-        setPreviewItems(stickers);
-      }
     } catch {
       showToast('Błąd zapisu produktu');
     } finally {
@@ -834,18 +868,18 @@ export function App() {
     }
   };
 
-  const handleMarkOpened = async (id: number) => {
+  const handleToggleOpened = async (id: number, opened: boolean) => {
     try {
       const res = await fetch(`/api/items/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'open' }),
+        body: JSON.stringify({ action: opened ? 'open' : 'close' }),
       });
       const data = await res.json();
       if (res.ok && data.item) {
         setActiveItem(data.item);
         refreshAll();
-        showToast('Oznaczono produkt jako otwarty');
+        showToast(opened ? 'Oznaczono produkt jako otwarty' : 'Oznaczono produkt jako zamknięty');
       }
     } catch {
       showToast('Błąd aktualizacji produktu');
@@ -930,7 +964,7 @@ export function App() {
     }
   };
 
-  const handleReprintSingle = async (serial: string, copies = 1) => {
+  const executeReprintSingle = async (serial: string, copies = 1) => {
     try {
       const res = await fetch('/api/print', {
         method: 'POST',
@@ -940,32 +974,31 @@ export function App() {
       const data = await res.json();
       if (data.ok) {
         showToast(`Wysłano dodruk etykiety ${serial} (${copies}x)`);
+        if (settingsOpen) fetchActivity();
       } else {
-        showToast(
-          `Drukarka niedostępna (${serial}) — otwieram podgląd do druku w przeglądarce`
-        );
-        if (data.qr_svg) {
-          setPreviewSummaryText(`Podgląd etykiety ${serial}`);
-          setPreviewItems([
-            {
-              serial_number: serial,
-              name: data.item_name || serial,
-              qr_svg: data.qr_svg,
-            },
-          ]);
-        }
+        showToast(data.error || `Drukarka niedostępna (${serial})`);
       }
     } catch {
       showToast('Błąd połączenia z drukarką');
     }
   };
 
-  const handleExecuteBatchReprint = async (opts: {
+  const requestSinglePrintConfirm = (serial: string, copies = 1, itemName?: string) => {
+    const validCopies = Math.min(20, Math.max(1, Math.round(copies) || 1));
+    setConfirmPrintRequest({
+      title: 'Potwierdź dodruk etykiety',
+      targetLabel: itemName ? `${itemName} (${serial})` : serial,
+      copiesLabel: `${validCopies} szt.`,
+      printerUrl: settings.printer_api_url,
+      onConfirm: () => executeReprintSingle(serial, validCopies),
+    });
+  };
+
+  const executeBatchReprint = async (opts: {
     serialNumbers?: string | string[];
     fromSerial?: string;
     toSerial?: string;
     copies: number;
-    previewOnly: boolean;
   }) => {
     try {
       const res = await fetch('/api/print/batch', {
@@ -976,29 +1009,58 @@ export function App() {
           from_serial: opts.fromSerial,
           to_serial: opts.toSerial,
           copies: opts.copies,
-          preview_only: opts.previewOnly,
+          preview_only: false,
         }),
       });
       const data = await res.json();
-      if (!res.ok && !data.labels) {
+      if (!res.ok) {
         showToast(data.error || 'Błąd przygotowania dodruku etykiet');
         return;
       }
 
-      setReprintOpen(false);
-      if (opts.previewOnly || !data.ok) {
-        setPreviewSummaryText(
-          opts.previewOnly
-            ? `Przygotowano ${data.total_labels || 0} etykiet do wydruku.`
-            : `Drukarka sieciowa niedostępna — przygotowano podgląd ${data.total_labels || 0} etykiet.`
-        );
-        setPreviewItems(data.labels || []);
-      } else {
+      if (data.ok) {
+        setReprintOpen(false);
         showToast(`Wydrukowano serię etykiet (${data.printed_count} szt.)`);
+      } else {
+        showToast(
+          `Wydrukowano ${data.printed_count || 0} szt., błędów drukarki: ${data.failed_count || 0}`
+        );
       }
     } catch {
       showToast('Błąd wykonania dodruku seryjnego');
     }
+  };
+
+  const requestBatchPrintConfirm = (opts: {
+    serialNumbers?: string | string[];
+    fromSerial?: string;
+    toSerial?: string;
+    copies: number;
+  }) => {
+    const validCopies = Math.min(20, Math.max(1, Math.round(opts.copies) || 1));
+    const hasRange = Boolean(opts.fromSerial && opts.toSerial);
+    const serialCount = Array.isArray(opts.serialNumbers)
+      ? opts.serialNumbers.length
+      : typeof opts.serialNumbers === 'string' && opts.serialNumbers.trim()
+        ? opts.serialNumbers.split(/[\n,;]+/).filter((s) => s.trim()).length
+        : 0;
+
+    if (!hasRange && serialCount === 0) {
+      showToast('Wybierz co najmniej jedną pozycję lub podaj zakres numerów.');
+      return;
+    }
+
+    const targetLabel = hasRange
+      ? `Zakres ${opts.fromSerial} – ${opts.toSerial}`
+      : `Wybrane pozycje (${serialCount})`;
+
+    setConfirmPrintRequest({
+      title: 'Potwierdź dodruk etykiet',
+      targetLabel,
+      copiesLabel: `${validCopies} na pozycję`,
+      printerUrl: settings.printer_api_url,
+      onConfirm: () => executeBatchReprint({ ...opts, copies: validCopies }),
+    });
   };
 
   const handleSaveSettings = async (patch: Partial<AppSettings>) => {
@@ -1031,7 +1093,7 @@ export function App() {
 
   const handleTestPrinter = async (printerConfig: Partial<AppSettings>) => {
     await handleSaveSettings(printerConfig);
-    await handleReprintSingle('AAA-0001', 1);
+    await executeReprintSingle('AAA-0001', 1);
   };
 
   const expiringBadgeCount = stats.attention_count || 0;
@@ -1147,7 +1209,7 @@ export function App() {
             }}
           >
             <IconSettings />
-            <span>Ustawienia i słowniki</span>
+            <span>Ustawienia</span>
           </button>
         </div>
       </aside>
@@ -1582,24 +1644,6 @@ export function App() {
                       <div className={`ean-feedback ${eanFeedback.tone}`}>{eanFeedback.text}</div>
                     )}
                   </div>
-
-                  {catalogSuggestions.length > 0 && (
-                    <div className="catalog-suggestions">
-                      {catalogSuggestions.map((prod) => (
-                        <button
-                          key={prod.ean}
-                          type="button"
-                          className="suggestion-chip"
-                          onClick={() => {
-                            setEanInput(prod.ean);
-                            lookupEanCode(prod.ean);
-                          }}
-                        >
-                          {prod.name} ({prod.ean})
-                        </button>
-                      ))}
-                    </div>
-                  )}
                 </div>
 
                 <div className="card">
@@ -1706,18 +1750,43 @@ export function App() {
                       </select>
                     </div>
 
+                    <div className="form-field full-width">
+                      <label className="ios-switch-row" htmlFor="addNoExpirySwitch">
+                        <span>Bez terminu ważności</span>
+                        <input
+                          id="addNoExpirySwitch"
+                          type="checkbox"
+                          role="switch"
+                          className="ios-switch"
+                          checked={addNoExpiry}
+                          onChange={(e) => {
+                            const checked = e.target.checked;
+                            setAddNoExpiry(checked);
+                            if (checked) {
+                              setAddExpiryDate('');
+                            }
+                          }}
+                        />
+                      </label>
+                    </div>
+
                     <div className="form-field">
                       <label htmlFor="itemExpiryInput">Data ważności</label>
                       <input
                         id="itemExpiryInput"
                         type="date"
-                        value={addExpiryDate}
-                        onChange={(e) => setAddExpiryDate(e.target.value)}
+                        value={addNoExpiry ? '' : addExpiryDate}
+                        disabled={addNoExpiry}
+                        onChange={(e) => {
+                          setAddExpiryDate(e.target.value);
+                          if (e.target.value) setAddNoExpiry(false);
+                        }}
                       />
                       <div className="date-Quick-row">
                         <button
                           type="button"
                           className="chip-btn"
+                          disabled={addNoExpiry}
                           onClick={() => applyQuickExpiryDays(3)}
                         >
                           +3 dni
@@ -1725,6 +1794,7 @@ export function App() {
                         <button
                           type="button"
                           className="chip-btn"
+                          disabled={addNoExpiry}
                           onClick={() => applyQuickExpiryDays(7)}
                         >
                           +7 dni
@@ -1732,6 +1802,7 @@ export function App() {
                         <button
                           type="button"
                           className="chip-btn"
+                          disabled={addNoExpiry}
                           onClick={() => applyQuickExpiryDays(14)}
                         >
                           +14 dni
@@ -1739,6 +1810,7 @@ export function App() {
                         <button
                           type="button"
                           className="chip-btn"
+                          disabled={addNoExpiry}
                           onClick={() => applyQuickExpiryDays(30)}
                         >
                           +1 mies.
@@ -1746,6 +1818,7 @@ export function App() {
                         <button
                           type="button"
                           className="chip-btn"
+                          disabled={addNoExpiry}
                           onClick={() => applyQuickExpiryDays(180)}
                         >
                           +6 mies.
@@ -1870,16 +1943,11 @@ export function App() {
         locations={locations}
         categories={categories}
         onConsumeAll={handleConsumeAll}
-        onMarkOpened={handleMarkOpened}
+        onToggleOpened={handleToggleOpened}
         onConsumePartial={handleConsumePartial}
         onMoveLocation={handleMoveLocation}
         onUpdateItem={handleUpdateItem}
-        onReprintApi={(serial, copies) => handleReprintSingle(serial, copies)}
-        onBrowserPrint={(stickers) => {
-          setActiveItem(null);
-          setPreviewSummaryText('Podgląd wydruku etykiet');
-          setPreviewItems(stickers);
-        }}
+        onRequestPrint={requestSinglePrintConfirm}
       />
 
       <ReprintModal
@@ -1887,8 +1955,8 @@ export function App() {
         onClose={() => setReprintOpen(false)}
         allItems={items}
         initialSelectedSerials={reprintInitialSerials}
-        onExecuteBatchReprint={handleExecuteBatchReprint}
-        onReprintSingle={(serial, copies) => handleReprintSingle(serial, copies)}
+        onExecuteBatchReprint={requestBatchPrintConfirm}
+        onReprintSingle={requestSinglePrintConfirm}
       />
 
       <SettingsModal
@@ -1899,45 +1967,75 @@ export function App() {
         onSaveSettings={handleSaveSettings}
         onTestPrinter={handleTestPrinter}
         onRestoreActivity={handleRestoreActivity}
-        onReprintSerial={(serial) => handleReprintSingle(serial, 1)}
+        onReprintSerial={(serial, itemName) => requestSinglePrintConfirm(serial, 1, itemName)}
       />
 
-      <LabelsPreviewModal
-        isOpen={previewItems.length > 0}
-        onClose={() => setPreviewItems([])}
-        items={previewItems}
-        summaryText={previewSummaryText}
-        onReprintSingle={(serial) => handleReprintSingle(serial, 1)}
-        onReprintAllApi={() => {
-          const serials = previewItems.map((i) => i.serial_number);
-          handleExecuteBatchReprint({
-            serialNumbers: serials,
-            copies: 1,
-            previewOnly: false,
-          });
-        }}
-        onBrowserPrint={() => window.print()}
+      <ConfirmPrintModal
+        request={confirmPrintRequest}
+        onClose={() => setConfirmPrintRequest(null)}
       />
 
-      {/* Toast Notification */}
-      <div
-        className={`toast-container ${toast ? '' : 'hidden'}`}
-        role="status"
-        aria-live="polite"
-      >
-        <span>{toast?.message}</span>
-        {toast?.actionLabel && toast?.onAction && (
-          <button
-            type="button"
-            className="toast-action"
-            onClick={() => {
-              toast.onAction?.();
-              setToast(null);
-            }}
-          >
-            {toast.actionLabel}
-          </button>
-        )}
+      {/* Toast Notification Region */}
+      <div role="region" aria-label="Powiadomienia">
+        <div
+          ref={toastRef}
+          {...(supportsPopover ? ({ popover: 'manual' } as React.HTMLAttributes<HTMLDivElement>) : {})}
+          className={`toast-container ${!supportsPopover && !toast ? 'hidden' : ''}`}
+          role="status"
+          aria-live="polite"
+          onMouseEnter={() => {
+            toastPausedRef.current = true;
+            if (toastTimerRef.current) {
+              window.clearTimeout(toastTimerRef.current);
+              toastTimerRef.current = null;
+            }
+          }}
+          onMouseLeave={() => {
+            if (toast) {
+              toastPausedRef.current = false;
+              scheduleToastDismiss();
+            }
+          }}
+          onFocus={() => {
+            toastPausedRef.current = true;
+            if (toastTimerRef.current) {
+              window.clearTimeout(toastTimerRef.current);
+              toastTimerRef.current = null;
+            }
+          }}
+          onBlur={(e) => {
+            if (toast && !e.currentTarget.contains(e.relatedTarget as Node | null)) {
+              toastPausedRef.current = false;
+              scheduleToastDismiss();
+            }
+          }}
+        >
+          <span className="toast-message">{toast?.message}</span>
+          {toast && (
+            <div className="toast-actions">
+              {toast.actionLabel && toast.onAction && (
+                <button
+                  type="button"
+                  className="toast-action"
+                  onClick={() => {
+                    toast.onAction?.();
+                    setToast(null);
+                  }}
+                >
+                  {toast.actionLabel}
+                </button>
+              )}
+              <button
+                type="button"
+                className="toast-close"
+                aria-label="Zamknij powiadomienie"
+                onClick={() => setToast(null)}
+              >
+                ×
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

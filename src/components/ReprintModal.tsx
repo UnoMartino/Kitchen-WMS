@@ -12,9 +12,8 @@ interface ReprintModalProps {
     fromSerial?: string;
     toSerial?: string;
     copies: number;
-    previewOnly: boolean;
   }) => void;
-  onReprintSingle: (serial: string, copies: number) => void;
+  onReprintSingle: (serial: string, copies: number, itemName?: string) => void;
 }
 
 export function ReprintModal({
@@ -83,27 +82,24 @@ export function ReprintModal({
     setSelectedSet(new Set());
   };
 
-  const triggerAction = (previewOnly: boolean) => {
+  const triggerAction = () => {
     const validCopies = Math.max(1, Math.min(20, copies));
     if (activeTab === 'select') {
       onExecuteBatchReprint({
         serialNumbers: Array.from(selectedSet),
-        copies: validCopies,
-        previewOnly
+        copies: validCopies
       });
     } else {
       if (fromSerial.trim() && toSerial.trim()) {
         onExecuteBatchReprint({
           fromSerial: fromSerial.trim(),
           toSerial: toSerial.trim(),
-          copies: validCopies,
-          previewOnly
+          copies: validCopies
         });
       } else {
         onExecuteBatchReprint({
           serialNumbers: serialListText.trim(),
-          copies: validCopies,
-          previewOnly
+          copies: validCopies
         });
       }
     }
@@ -182,10 +178,10 @@ export function ReprintModal({
                             onClick={(e) => {
                               e.preventDefault();
                               e.stopPropagation();
-                              onReprintSingle(item.serial_number, 1);
+                              onReprintSingle(item.serial_number, 1, item.name);
                             }}
                           >
-                            Dodrukuj 1x
+                            Dodrukuj etykietę
                           </button>
                         </label>
                       );
@@ -287,17 +283,10 @@ export function ReprintModal({
         <div className="dialog-footer">
           <button
             type="button"
-            className="btn-secondary"
-            onClick={() => triggerAction(true)}
-          >
-            Podgląd druku
-          </button>
-          <button
-            type="button"
             className="btn-primary"
-            onClick={() => triggerAction(false)}
+            onClick={triggerAction}
           >
-            Dodrukuj API
+            Dodrukuj etykietę
           </button>
         </div>
 

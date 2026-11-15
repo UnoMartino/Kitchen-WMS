@@ -67,16 +67,8 @@ function diffDays(targetDateStr, todayStr = getTodayDateString()) {
 function enrichItem(row, warningDays = 7, todayStr = getTodayDateString()) {
   if (!row) return null;
 
-  let effectiveExpiry = row.expiry_date || null;
-  let openedExpiry = null;
-
-  if (row.is_opened && row.opened_at && row.days_after_opening) {
-    const openedDateOnly = String(row.opened_at).slice(0, 10);
-    openedExpiry = addDaysToDateString(openedDateOnly, row.days_after_opening);
-    if (openedExpiry && (!effectiveExpiry || openedExpiry < effectiveExpiry)) {
-      effectiveExpiry = openedExpiry;
-    }
-  }
+  const effectiveExpiry = row.expiry_date || null;
+  const openedExpiry = null;
 
   const daysRemaining = diffDays(effectiveExpiry, todayStr);
   let expiryStatus = 'none';
@@ -531,19 +523,26 @@ function createAppServer(customDbPath) {
         const warningDays = parseInt(settings.expiry_warning_days || '7', 10) || 7;
 
         if (body.action === 'open') {
-          const daysAfter =
-            body.days_after_opening !== undefined
-              ? parseInt(body.days_after_opening, 10) || null
-              : existing.days_after_opening || 3;
           db.prepare(`
             UPDATE inventory_items
-            SET is_opened = 1, opened_at = ?, days_after_opening = ?, updated_at = ?
+            SET is_opened = 1, opened_at = ?, updated_at = ?
             WHERE id = ?
-          `).run(now, daysAfter, now, existing.id);
+          `).run(now, now, existing.id);
 
-          logActivity(db, 'opened', existing.serial_number, existing.name, {
-            days_after_opening: daysAfter
-          });
+          logActivity(db, 'opened', existing.serial_number, existing.name, {});
+
+          const updated = db.prepare(`SELECT * FROM inventory_items WHERE id = ?`).get(existing.id);
+          return sendJson(res, 200, { ok: true, item: enrichItem(updated, warningDays) });
+        }
+
+        if (body.action === 'close') {
+          db.prepare(`
+            UPDATE inventory_items
+            SET is_opened = 0, opened_at = NULL, updated_at = ?
+            WHERE id = ?
+          `).run(now, existing.id);
+
+          logActivity(db, 'closed', existing.serial_number, existing.name, {});
 
           const updated = db.prepare(`SELECT * FROM inventory_items WHERE id = ?`).get(existing.id);
           return sendJson(res, 200, { ok: true, item: enrichItem(updated, warningDays) });

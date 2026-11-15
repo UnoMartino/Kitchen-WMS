@@ -145,7 +145,7 @@ export function getExpiryBadgeInfo(item: InventoryItem): {
     return {
       cls: 'pill-none',
       marker: '[—]',
-      text: 'Brak daty'
+      text: 'Bez terminu'
     };
   }
   if (d < 0) {

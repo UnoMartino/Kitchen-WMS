@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useId } from 'react';
-import { InventoryItem, LabelStickerItem } from '../types';
+import { InventoryItem } from '../types';
 import { useDialogModal, getExpiryBadgeInfo } from '../utils/dialogLightDismiss';
 
 interface ItemModalProps {
@@ -10,7 +10,7 @@ interface ItemModalProps {
   locations: string[];
   categories: string[];
   onConsumeAll: (serial: string) => void;
-  onMarkOpened: (id: number) => void;
+  onToggleOpened: (id: number, opened: boolean) => void;
   onConsumePartial: (id: number, opts: { fraction?: number; delta?: number }) => void;
   onMoveLocation: (id: number, newLocation: string) => void;
   onUpdateItem: (
@@ -26,8 +26,7 @@ interface ItemModalProps {
       notes: string;
     }
   ) => void;
-  onReprintApi: (serial: string, copies: number) => void;
-  onBrowserPrint: (items: LabelStickerItem[]) => void;
+  onRequestPrint: (serial: string, copies: number, itemName?: string) => void;
 }
 
 export function ItemModal({
@@ -38,12 +37,11 @@ export function ItemModal({
   locations,
   categories,
   onConsumeAll,
-  onMarkOpened,
+  onToggleOpened,
   onConsumePartial,
   onMoveLocation,
   onUpdateItem,
-  onReprintApi,
-  onBrowserPrint
+  onRequestPrint
 }: ItemModalProps) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -51,8 +49,8 @@ export function ItemModal({
   useDialogModal(dialogRef, isOpen, onClose);
 
   const [displayItem, setDisplayItem] = useState<InventoryItem | null>(item);
-  const [activeTab, setActiveTab] = useState<'actions' | 'edit'>('actions');
-  const [copies, setCopies] = useState('1');
+  const [activeTab, setActiveTab] = useState<'actions' | 'print' | 'edit'>('actions');
+  const [copies, setCopies] = useState(1);
   const [editName, setEditName] = useState('');
   const [editBrand, setEditBrand] = useState('');
   const [editCategory, setEditCategory] = useState('');
@@ -60,12 +58,13 @@ export function ItemModal({
   const [editQuantity, setEditQuantity] = useState('1');
   const [editUnit, setEditUnit] = useState('szt.');
   const [editExpiry, setEditExpiry] = useState('');
+  const [editNoExpiry, setEditNoExpiry] = useState(false);
   const [editNotes, setEditNotes] = useState('');
 
   useEffect(() => {
     if (item) {
       setDisplayItem(item);
-      setCopies('1');
+      setCopies(1);
       setEditName(item.name || '');
       setEditBrand(item.brand || '');
       setEditCategory(item.category || categories[0] || 'Inne');
@@ -73,6 +72,7 @@ export function ItemModal({
       setEditQuantity(String(item.quantity));
       setEditUnit(item.unit || 'szt.');
       setEditExpiry(item.expiry_date || '');
+      setEditNoExpiry(!item.expiry_date);
       setEditNotes(item.notes || '');
     }
   }, [item, categories, locations]);
@@ -90,7 +90,9 @@ export function ItemModal({
   }, [activeTab]);
 
   const activeData = item ?? displayItem;
-  const badge = activeData ? getExpiryBadgeInfo(activeData) : { cls: 'pill-none', marker: '[—]', text: '' };
+  const badge = activeData
+    ? getExpiryBadgeInfo(activeData)
+    : { cls: 'pill-none', marker: '[—]', text: '' };
 
   const handleEditSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -102,23 +104,9 @@ export function ItemModal({
       location: editLocation,
       quantity: parseFloat(editQuantity.replace(',', '.')) || 1,
       unit: editUnit,
-      expiry_date: editExpiry || null,
+      expiry_date: editNoExpiry ? null : editExpiry || null,
       notes: editNotes.trim()
     });
-  };
-
-  const handleBrowserPreview = () => {
-    if (!activeData) return;
-    const count = Math.min(20, Math.max(1, parseInt(copies, 10) || 1));
-    const list: LabelStickerItem[] = [];
-    for (let i = 0; i < count; i++) {
-      list.push({
-        serial_number: activeData.serial_number,
-        name: activeData.name,
-        qr_svg: qrSvg
-      });
-    }
-    onBrowserPrint(list);
   };
 
   return (
@@ -149,7 +137,7 @@ export function ItemModal({
 
           <div className="dialog-body" ref={bodyRef}>
             <div key={activeTab} className="dialog-tab-panel">
-              {activeTab === 'actions' ? (
+              {activeTab === 'actions' && (
                 <>
                   <div className="item-hero">
                     <div
@@ -210,10 +198,10 @@ export function ItemModal({
                       </button>
                       <button
                         type="button"
-                        className="btn-warning btn-large"
-                        onClick={() => onMarkOpened(activeData.id)}
+                        className={activeData.is_opened ? 'btn-secondary btn-large' : 'btn-warning btn-large'}
+                        onClick={() => onToggleOpened(activeData.id, !activeData.is_opened)}
                       >
-                        {activeData.is_opened ? 'Odśwież otwarcie' : 'Oznacz otwarte'}
+                        {activeData.is_opened ? 'Oznacz jako zamknięte' : 'Oznacz otwarte'}
                       </button>
                     </div>
 
@@ -261,8 +249,76 @@ export function ItemModal({
                     </div>
                   </div>
                 </>
-              ) : (
-                <form id={`${titleId}-edit-form`} onSubmit={handleEditSubmit} className="stacked-form compact-form">
+              )}
+
+              {activeTab === 'print' && (
+                <div className="print-tab-panel">
+                  <div className="print-label-card">
+                    <span className="serial-badge-large">{activeData.serial_number}</span>
+                    <h2 id={titleId} className="modal-product-title">
+                      {activeData.name}
+                    </h2>
+                    <p className="modal-product-meta">
+                      {[activeData.brand, activeData.location].filter(Boolean).join(' • ')}
+                    </p>
+                  </div>
+
+                  <div className="print-controls-box">
+                    <div className="batch-control">
+                      <label htmlFor={`${titleId}-copies`}>Liczba kopii etykiety:</label>
+                      <div className="stepper">
+                        <button
+                          type="button"
+                          className="stepper-btn"
+                          onClick={() => setCopies((c) => Math.max(1, c - 1))}
+                          aria-label="Zmniejsz liczbę kopii"
+                        >
+                          −
+                        </button>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          id={`${titleId}-copies`}
+                          value={copies}
+                          onChange={(e) =>
+                            setCopies(Math.min(20, Math.max(1, parseInt(e.target.value, 10) || 1)))
+                          }
+                          aria-label="Liczba kopii etykiety do dodruku"
+                        />
+                        <button
+                          type="button"
+                          className="stepper-btn"
+                          onClick={() => setCopies((c) => Math.min(20, c + 1))}
+                          aria-label="Zwiększ liczbę kopii"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      className="btn-primary btn-lg"
+                      onClick={() =>
+                        onRequestPrint(activeData.serial_number, copies, activeData.name)
+                      }
+                    >
+                      Dodrukuj etykietę
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === 'edit' && (
+                <form
+                  id={`${titleId}-edit-form`}
+                  onSubmit={handleEditSubmit}
+                  className="stacked-form compact-form"
+                  aria-labelledby={titleId}
+                >
+                  <h2 id={titleId} className="visually-hidden">
+                    Edycja produktu {activeData.name}
+                  </h2>
                   <div className="form-row-2">
                     <div className="field">
                       <label htmlFor={`${titleId}-name`}>Nazwa produktu</label>
@@ -316,7 +372,7 @@ export function ItemModal({
                     </div>
                   </div>
 
-                  <div className="form-row-3">
+                  <div className="form-row-2">
                     <div className="field">
                       <label htmlFor={`${titleId}-qty`}>Aktualna ilość</label>
                       <input
@@ -336,23 +392,50 @@ export function ItemModal({
                         onChange={(e) => setEditUnit(e.target.value)}
                       >
                         <option value="szt.">szt.</option>
+                        <option value="opak.">opak.</option>
                         <option value="g">g</option>
                         <option value="kg">kg</option>
                         <option value="ml">ml</option>
                         <option value="l">l</option>
-                        <option value="opak.">opak.</option>
+                        <option value="słoik">słoik</option>
+                        <option value="puszka">puszka</option>
                         <option value="porcje">porcje</option>
                       </select>
                     </div>
-                    <div className="field">
-                      <label htmlFor={`${titleId}-exp`}>Data ważności</label>
+                  </div>
+
+                  <div className="field">
+                    <label className="ios-switch-row" htmlFor={`${titleId}-no-exp`}>
+                      <span>Bez terminu ważności</span>
                       <input
-                        type="date"
-                        id={`${titleId}-exp`}
-                        value={editExpiry}
-                        onChange={(e) => setEditExpiry(e.target.value)}
+                        type="checkbox"
+                        role="switch"
+                        className="ios-switch"
+                        id={`${titleId}-no-exp`}
+                        checked={editNoExpiry}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setEditNoExpiry(checked);
+                          if (checked) {
+                            setEditExpiry('');
+                          }
+                        }}
                       />
-                    </div>
+                    </label>
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor={`${titleId}-exp`}>Data ważności</label>
+                    <input
+                      type="date"
+                      id={`${titleId}-exp`}
+                      value={editNoExpiry ? '' : editExpiry}
+                      disabled={editNoExpiry}
+                      onChange={(e) => {
+                        setEditExpiry(e.target.value);
+                        if (e.target.value) setEditNoExpiry(false);
+                      }}
+                    />
                   </div>
 
                   <div className="field">
@@ -372,34 +455,6 @@ export function ItemModal({
             </div>
           </div>
 
-          {activeTab === 'actions' && (
-            <div className="dialog-footer dialog-footer-reprint">
-              <div className="reprint-copies-inline">
-                <label htmlFor={`${titleId}-copies`}>Kopie:</label>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  id={`${titleId}-copies`}
-                  value={copies}
-                  onChange={(e) => setCopies(e.target.value)}
-                  aria-label="Liczba kopii etykiety do dodruku"
-                />
-              </div>
-              <div className="dialog-footer-buttons">
-                <button
-                  type="button"
-                  className="btn-primary"
-                  onClick={() => onReprintApi(activeData.serial_number, parseInt(copies, 10) || 1)}
-                >
-                  Dodrukuj API
-                </button>
-                <button type="button" className="btn-secondary" onClick={handleBrowserPreview}>
-                  Podgląd
-                </button>
-              </div>
-            </div>
-          )}
-
           <div className="dialog-bottom-tabs">
             <div className="segmented-control" role="tablist" aria-label="Widok karty produktu">
               <button
@@ -409,7 +464,16 @@ export function ItemModal({
                 className={`seg-btn ${activeTab === 'actions' ? 'active' : ''}`}
                 onClick={() => setActiveTab('actions')}
               >
-                Szczegóły i akcje
+                Szczegóły
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeTab === 'print'}
+                className={`seg-btn ${activeTab === 'print' ? 'active' : ''}`}
+                onClick={() => setActiveTab('print')}
+              >
+                Drukuj
               </button>
               <button
                 type="button"
@@ -418,7 +482,7 @@ export function ItemModal({
                 className={`seg-btn ${activeTab === 'edit' ? 'active' : ''}`}
                 onClick={() => setActiveTab('edit')}
               >
-                Edycja produktu
+                Edycja
               </button>
             </div>
           </div>
@@ -427,4 +491,3 @@ export function ItemModal({
     </dialog>
   );
 }
-
