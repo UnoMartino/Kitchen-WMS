@@ -156,17 +156,34 @@ export function App() {
     []
   );
 
-  // Sync iOS Safari theme-color meta tags & root background so color bleeds onto top/bottom bars
+  // Sync iOS Safari theme-color, root background, and standalone PWA / iOS device classes
   useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const syncThemeColor = () => {
-      const color = mq.matches ? '#000000' : '#f2f2f7';
+    const mqDark = window.matchMedia('(prefers-color-scheme: dark)');
+    const mqStandalone = window.matchMedia('(display-mode: standalone)');
+
+    const syncEnvironment = () => {
+      const color = mqDark.matches ? '#000000' : '#f2f2f7';
       document.documentElement.style.backgroundColor = color;
       document.body.style.backgroundColor = color;
+
+      const isStandalone =
+        mqStandalone.matches ||
+        (window.navigator as Navigator & { standalone?: boolean }).standalone === true;
+      const isIOS =
+        /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+      document.documentElement.classList.toggle('pwa-standalone', isStandalone);
+      document.documentElement.classList.toggle('ios-device', isIOS);
     };
-    syncThemeColor();
-    mq.addEventListener('change', syncThemeColor);
-    return () => mq.removeEventListener('change', syncThemeColor);
+
+    syncEnvironment();
+    mqDark.addEventListener('change', syncEnvironment);
+    mqStandalone.addEventListener('change', syncEnvironment);
+    return () => {
+      mqDark.removeEventListener('change', syncEnvironment);
+      mqStandalone.removeEventListener('change', syncEnvironment);
+    };
   }, []);
 
   const fetchStatsAndSettings = useCallback(async () => {

@@ -81,6 +81,26 @@
   /* Fixed navigation heights so bars never change scale or shift across tabs */
   --topbar-height: 52px;
   --tabbar-height: 56px;
+
+  /* Safe-area insets (with standalone Dynamic Island / Home Indicator fallbacks below) */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
+@media (max-width: 899px) and (display-mode: standalone) {
+  :root {
+    --safe-top: max(env(safe-area-inset-top, 0px), 59px);
+    --safe-bottom: max(env(safe-area-inset-bottom, 0px), 20px);
+  }
+}
+
+@media (max-width: 899px) {
+  html.pwa-standalone {
+    --safe-top: max(env(safe-area-inset-top, 0px), 59px);
+    --safe-bottom: max(env(safe-area-inset-bottom, 0px), 20px);
+  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -139,6 +159,7 @@ body {
   max-width: 100%;
   min-height: 100dvh;
   overflow-x: clip;
+  overflow-wrap: anywhere;
   background-color: var(--bg-canvas);
   color: var(--text-primary);
   font-family: var(--font-sans);
@@ -147,6 +168,27 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   -webkit-text-size-adjust: 100%;
+}
+
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+}
+
+p,
+li {
+  text-wrap: pretty;
+}
+
+button,
+.tab-btn,
+.item-card,
+.summary-card,
+.pill,
+.seg-option {
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
 }
 
 #root {
@@ -176,16 +218,18 @@ body {
   display: none;
 }
 
-/* Mobile Top Bar — Fixed height, bleeds into iOS top safe area */
+/* Mobile Top Bar — Fixed frosted bar, clears Dynamic Island & status bar safely */
 .topbar {
-  position: sticky;
+  position: fixed;
   top: 0;
-  z-index: 40;
+  left: 0;
+  right: 0;
+  z-index: 45;
   width: 100%;
   max-width: 100%;
-  padding-top: env(safe-area-inset-top, 0px);
-  padding-left: max(1rem, env(safe-area-inset-left, 0px));
-  padding-right: max(1rem, env(safe-area-inset-right, 0px));
+  padding-top: var(--safe-top);
+  padding-left: max(1rem, var(--safe-left));
+  padding-right: max(1rem, var(--safe-right));
   background-color: var(--bg-glass);
   backdrop-filter: saturate(180%) blur(20px);
   -webkit-backdrop-filter: saturate(180%) blur(20px);
@@ -302,10 +346,10 @@ body {
   max-width: 1160px;
   min-width: 0;
   margin: 0 auto;
-  padding-top: 0.875rem;
-  padding-left: max(1rem, env(safe-area-inset-left, 0px));
-  padding-right: max(1rem, env(safe-area-inset-right, 0px));
-  padding-bottom: calc(var(--tabbar-height) + env(safe-area-inset-bottom, 0px) + 1.5rem);
+  padding-top: calc(var(--topbar-height) + var(--safe-top) + 0.875rem);
+  padding-left: max(1rem, var(--safe-left));
+  padding-right: max(1rem, var(--safe-right));
+  padding-bottom: calc(var(--tabbar-height) + var(--safe-bottom) + 1.5rem);
   overflow-x: clip;
 }
 
@@ -331,12 +375,12 @@ body {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   align-items: stretch;
-  height: calc(var(--tabbar-height) + env(safe-area-inset-bottom, 0px));
-  min-height: calc(var(--tabbar-height) + env(safe-area-inset-bottom, 0px));
-  max-height: calc(var(--tabbar-height) + env(safe-area-inset-bottom, 0px));
-  padding-bottom: env(safe-area-inset-bottom, 0px);
-  padding-left: env(safe-area-inset-left, 0px);
-  padding-right: env(safe-area-inset-right, 0px);
+  height: calc(var(--tabbar-height) + var(--safe-bottom));
+  min-height: calc(var(--tabbar-height) + var(--safe-bottom));
+  max-height: calc(var(--tabbar-height) + var(--safe-bottom));
+  padding-bottom: var(--safe-bottom);
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
   background-color: var(--bg-glass);
   backdrop-filter: saturate(180%) blur(20px);
   -webkit-backdrop-filter: saturate(180%) blur(20px);
@@ -1802,7 +1846,7 @@ dialog::backdrop {
 .toast-container {
   position: fixed;
   left: 50%;
-  bottom: calc(var(--tabbar-height) + env(safe-area-inset-bottom, 0px) + 0.75rem);
+  bottom: calc(var(--tabbar-height) + var(--safe-bottom) + 0.75rem);
   transform: translateX(-50%);
   z-index: 60;
   display: flex;
@@ -1861,9 +1905,19 @@ dialog::backdrop {
     height: 100dvh;
     position: sticky;
     top: 0;
-    padding: 1.25rem 1rem;
+    padding: max(1.25rem, calc(var(--safe-top) + 0.5rem)) 1rem 1.25rem;
     background: var(--bg-elevated);
     border-right: 0.5px solid var(--separator);
+  }
+
+  .topbar {
+    position: sticky;
+    top: 0;
+    left: auto;
+    right: auto;
+    padding-top: var(--safe-top);
+    padding-left: 2rem;
+    padding-right: 2rem;
   }
 
   .brand {
@@ -2099,7 +2153,7 @@ dialog {
   color: var(--text-primary);
   padding: 0;
   width: min(94vw, 620px);
-  max-height: 88dvh;
+  max-height: calc(100dvh - var(--safe-top) - 1rem);
   box-shadow: var(--shadow-elevated);
   margin: auto;
   overflow: hidden;
@@ -2108,12 +2162,13 @@ dialog {
 .dialog-sheet {
   display: flex;
   flex-direction: column;
-  max-height: 88dvh;
+  max-height: calc(100dvh - var(--safe-top) - 1rem);
   width: 100%;
   min-width: 0;
 }
 
 .dialog-header {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2177,10 +2232,49 @@ dialog {
   justify-content: flex-end;
   gap: 0.5rem;
   padding: 0.85rem 1.125rem;
+  padding-bottom: max(0.85rem, calc(var(--safe-bottom) + 0.35rem));
   border-top: 0.5px solid var(--separator);
   background: var(--bg-elevated);
   flex-wrap: wrap;
   flex-shrink: 0;
+}
+
+@media (max-width: 639px) {
+  dialog {
+    margin: auto 0 0 0;
+    width: 100%;
+    max-width: 100%;
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    border-bottom: none;
+  }
+
+  .dialog-header {
+    padding-top: 1.35rem;
+  }
+
+  .dialog-header::before {
+    content: "";
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 36px;
+    height: 5px;
+    border-radius: 999px;
+    background: var(--separator);
+  }
+}
+
+@media (pointer: coarse) {
+  .btn,
+  .btn-primary,
+  .btn-secondary,
+  .btn-danger,
+  .btn-warning,
+  .dialog-close-btn,
+  .icon-btn {
+    min-height: 44px;
+  }
 }
 
 .dialog-footer-reprint {
