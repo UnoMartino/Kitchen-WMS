@@ -1,0 +1,21 @@
+services:
+  kitchen-wms:
+    build: .
+    container_name: kitchen-wms
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=production
+      - HOST=0.0.0.0
+      - PORT=3000
+      - DB_PATH=/data/kitchen.db
+      - PRINTER_API_URL=${PRINTER_API_URL:-http://10.10.20.2:8769/print}
+      - TZ=Europe/Warsaw
+    volumes:
+      - kitchen_wms_data:/data
+
+volumes:
+  kitchen_wms_data:
+    driver: local
+

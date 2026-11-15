@@ -1,0 +1,30 @@
+{
+  "name": "kitchen-wms",
+  "version": "2.0.0",
+  "description": "System zarządzania zapasami kuchennymi (Spiżarnia WMS) — React + TypeScript + Vite + SQLite",
+  "main": "server/index.js",
+  "scripts": {
+    "dev:server": "node --watch --no-warnings server/index.js",
+    "dev:client": "vite",
+    "build": "tsc && vite build",
+    "start": "node --no-warnings server/index.js",
+    "test": "node --no-warnings test/api.test.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "jsqr": "^1.4.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  }
+}
