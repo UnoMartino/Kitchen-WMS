@@ -1,19 +1,74 @@
-import { useEffect, RefObject } from 'react';
+import { useEffect, useRef, RefObject } from 'react';
 import { InventoryItem } from '../types';
+
+let supportsDisplayTransition: boolean | undefined;
+
+function canTransitionDisplay(): boolean {
+  if (supportsDisplayTransition !== undefined) return supportsDisplayTransition;
+  if (!window.CSS?.supports?.('transition-behavior', 'allow-discrete') || !document.body) {
+    supportsDisplayTransition = false;
+    return false;
+  }
+  const probe = document.createElement('div');
+  probe.style.cssText = 'transition: display 1s allow-discrete !important; display: block;';
+  document.body.appendChild(probe);
+  getComputedStyle(probe).display;
+  probe.style.display = 'none';
+  supportsDisplayTransition = getComputedStyle(probe).display === 'block';
+  probe.remove();
+  return supportsDisplayTransition;
+}
+
+function supportsTopLayerExit(): boolean {
+  return Boolean(window.CSS?.supports?.('overlay', 'auto') && canTransitionDisplay());
+}
+
+/**
+ * Smoothly animates a modal <dialog> out of the top layer in browsers
+ * without native `overlay` + discrete `display` exit transitions (e.g. Safari/Firefox).
+ */
+export async function closeDialogAnimated(dialog: HTMLDialogElement): Promise<void> {
+  if (!dialog.open || dialog.hasAttribute('data-closing')) return;
+
+  if (!supportsTopLayerExit()) {
+    dialog.setAttribute('data-closing', '');
+    // Flush computed styles so getAnimations() sees the newly started exit transitions
+    getComputedStyle(dialog).opacity;
+    const animations = dialog.getAnimations({ subtree: true });
+    if (animations.length > 0) {
+      await Promise.race([
+        Promise.allSettled(animations.map((a) => a.finished)),
+        new Promise((resolve) => window.setTimeout(resolve, 600)),
+      ]);
+    }
+    if (!dialog.hasAttribute('data-closing')) return;
+    dialog.removeAttribute('data-closing');
+  }
+
+  if (dialog.open) {
+    dialog.close();
+  }
+}
 
 export function useDialogModal(
   dialogRef: RefObject<HTMLDialogElement | null>,
   isOpen: boolean,
   onClose: () => void
 ) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
 
-    if (isOpen && !dialog.open) {
-      dialog.showModal();
-    } else if (!isOpen && dialog.open) {
-      dialog.close();
+    if (isOpen) {
+      dialog.removeAttribute('data-closing');
+      if (!dialog.open) {
+        dialog.showModal();
+      }
+    } else if (dialog.open) {
+      void closeDialogAnimated(dialog);
     }
   }, [isOpen, dialogRef]);
 
@@ -22,34 +77,55 @@ export function useDialogModal(
     if (!dialog) return;
 
     const handleNativeClose = () => {
-      onClose();
+      dialog.removeAttribute('data-closing');
+      onCloseRef.current();
     };
-    dialog.addEventListener('close', handleNativeClose);
 
-    // Fallback for browsers without native <dialog closedby="any"> support
-    let handleBackdropClick: ((event: MouseEvent) => void) | null = null;
+    const handleCancel = (event: Event) => {
+      event.preventDefault();
+      void closeDialogAnimated(dialog);
+    };
+
+    dialog.addEventListener('close', handleNativeClose);
+    dialog.addEventListener('cancel', handleCancel);
+
+    // Fallback for browsers without native <dialog closedby="any"> support (e.g. Safari/iOS)
+    let handlePointerDown: ((event: PointerEvent) => void) | null = null;
+    let handlePointerUp: ((event: PointerEvent) => void) | null = null;
     if (!('closedBy' in HTMLDialogElement.prototype)) {
-      handleBackdropClick = (event: MouseEvent) => {
-        if (event.target !== dialog) return;
+      const isOutside = (event: PointerEvent) => {
         const rect = dialog.getBoundingClientRect();
-        const isDialogContent =
-          rect.top <= event.clientY &&
-          event.clientY <= rect.top + rect.height &&
-          rect.left <= event.clientX &&
-          event.clientX <= rect.left + rect.width;
-        if (isDialogContent) return;
-        dialog.close();
+        return (
+          event.clientX < rect.left ||
+          event.clientX > rect.right ||
+          event.clientY < rect.top ||
+          event.clientY > rect.bottom
+        );
       };
-      dialog.addEventListener('click', handleBackdropClick);
+      let pressedOutside = false;
+      handlePointerDown = (event: PointerEvent) => {
+        pressedOutside = isOutside(event);
+      };
+      handlePointerUp = (event: PointerEvent) => {
+        if (pressedOutside && isOutside(event)) {
+          void closeDialogAnimated(dialog);
+        }
+      };
+      dialog.addEventListener('pointerdown', handlePointerDown);
+      dialog.addEventListener('pointerup', handlePointerUp);
     }
 
     return () => {
       dialog.removeEventListener('close', handleNativeClose);
-      if (handleBackdropClick) {
-        dialog.removeEventListener('click', handleBackdropClick);
+      dialog.removeEventListener('cancel', handleCancel);
+      if (handlePointerDown) {
+        dialog.removeEventListener('pointerdown', handlePointerDown);
+      }
+      if (handlePointerUp) {
+        dialog.removeEventListener('pointerup', handlePointerUp);
       }
     };
-  }, [dialogRef, onClose]);
+  }, [dialogRef]);
 }
 
 export function formatDatePl(dateStr: string | null | undefined): string {

@@ -212,12 +212,197 @@ async function runTests() {
     assert.match(htmlText, /#f2f2f7/i);
     assert.match(htmlText, /#000000/i);
 
-    console.log('Wszystkie testy API i integracji Vite przeszły pomyślnie.');
+    console.log('10. Testowanie dekodera kodów QR i EAN-13 (zdjęcie oraz klatki wideo na żywo)...');
+    await runScannerDecoderTests();
+
+    console.log('Wszystkie testy API, dekodera i integracji Vite przeszły pomyślnie.');
   } finally {
     server.close();
     mockPrinterServer.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+}
+
+function loadScannerModule() {
+  const ts = require('typescript');
+  const { createRequire } = require('node:module');
+  const decoderPath = path.join(__dirname, '..', 'src', 'utils', 'ean13Decoder.ts');
+  const tsSource = fs.readFileSync(decoderPath, 'utf8');
+  const { outputText } = ts.transpileModule(tsSource, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+      esModuleInterop: true
+    }
+  });
+  const mod = { exports: {} };
+  const fn = new Function('module', 'exports', 'require', 'window', outputText);
+  fn(mod, mod.exports, createRequire(decoderPath), {});
+  return mod.exports;
+}
+
+function makeSolidImageData(width, height, r = 245, g = 245, b = 245) {
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = r;
+    data[i + 1] = g;
+    data[i + 2] = b;
+    data[i + 3] = 255;
+  }
+  return { width, height, data };
+}
+
+function drawQrIntoImage(imageData, text, { offsetX, offsetY, modulePx, invert = false }) {
+  const QRCode = require('qrcode');
+  const qr = QRCode.create(text, { errorCorrectionLevel: 'M' });
+  const n = qr.modules.size;
+  const fg = invert ? 245 : 15;
+  const bg = invert ? 20 : 245;
+
+  const pad = 3 * modulePx;
+  const totalPx = n * modulePx + pad * 2;
+  for (let dy = 0; dy < totalPx; dy++) {
+    const py = offsetY + dy;
+    if (py < 0 || py >= imageData.height) continue;
+    for (let dx = 0; dx < totalPx; dx++) {
+      const px = offsetX + dx;
+      if (px < 0 || px >= imageData.width) continue;
+      const mx = Math.floor((dx - pad) / modulePx);
+      const my = Math.floor((dy - pad) / modulePx);
+      const isDark = mx >= 0 && my >= 0 && mx < n && my < n && Boolean(qr.modules.data[my * n + mx]);
+      const val = isDark ? fg : bg;
+      const idx = (py * imageData.width + px) * 4;
+      imageData.data[idx] = val;
+      imageData.data[idx + 1] = val;
+      imageData.data[idx + 2] = val;
+      imageData.data[idx + 3] = 255;
+    }
+  }
+}
+
+function encodeEan13Bits(ean13) {
+  const L = ['0001101', '0011001', '0010011', '0111101', '0100011', '0110001', '0101111', '0111011', '0110111', '0001011'];
+  const G = ['0100111', '0110011', '0011011', '0100001', '0011101', '0111001', '0000101', '0010001', '0001001', '0010111'];
+  const R = ['1110010', '1100110', '1101100', '1000010', '1011100', '1001110', '1010000', '1000100', '1001000', '1110100'];
+  const PARITY = ['LLLLLL', 'LLGLGG', 'LLGGLG', 'LLGGGL', 'LGLLGG', 'LGGLLG', 'LGGGLL', 'LGLGLG', 'LGLGGL', 'LGGLGL'];
+
+  const first = Number(ean13[0]);
+  const pattern = PARITY[first];
+  let bits = '101';
+  for (let i = 0; i < 6; i++) {
+    const d = Number(ean13[1 + i]);
+    bits += pattern[i] === 'L' ? L[d] : G[d];
+  }
+  bits += '01010';
+  for (let i = 7; i < 13; i++) {
+    bits += R[Number(ean13[i])];
+  }
+  bits += '101';
+  return bits;
+}
+
+function drawEan13IntoImage(imageData, code, { offsetX, offsetY, barWidth, barHeight }) {
+  const bits = encodeEan13Bits(code);
+  for (let y = 0; y < barHeight; y++) {
+    const py = offsetY + y;
+    if (py < 0 || py >= imageData.height) continue;
+    for (let i = 0; i < bits.length; i++) {
+      const val = bits[i] === '1' ? 12 : 246;
+      for (let bx = 0; bx < barWidth; bx++) {
+        const px = offsetX + i * barWidth + bx;
+        if (px < 0 || px >= imageData.width) continue;
+        const idx = (py * imageData.width + px) * 4;
+        imageData.data[idx] = val;
+        imageData.data[idx + 1] = val;
+        imageData.data[idx + 2] = val;
+        imageData.data[idx + 3] = 255;
+      }
+    }
+  }
+}
+
+function createMockCanvasFromFrame(frame) {
+  let buf = makeSolidImageData(1, 1);
+  const ctx = {
+    drawImage(_src, sx, sy, sw, sh, dx, dy, dw, dh) {
+      buf = makeSolidImageData(dw, dh);
+      for (let y = 0; y < dh; y++) {
+        const srcY = Math.min(frame.height - 1, Math.max(0, Math.floor(sy + (y * sh) / dh)));
+        for (let x = 0; x < dw; x++) {
+          const srcX = Math.min(frame.width - 1, Math.max(0, Math.floor(sx + (x * sw) / dw)));
+          const sIdx = (srcY * frame.width + srcX) * 4;
+          const dIdx = ((dy + y) * dw + (dx + x)) * 4;
+          buf.data[dIdx] = frame.data[sIdx];
+          buf.data[dIdx + 1] = frame.data[sIdx + 1];
+          buf.data[dIdx + 2] = frame.data[sIdx + 2];
+          buf.data[dIdx + 3] = frame.data[sIdx + 3];
+        }
+      }
+    },
+    getImageData(x, y, w, h) {
+      assert.equal(x, 0);
+      assert.equal(y, 0);
+      assert.equal(w, buf.width);
+      assert.equal(h, buf.height);
+      return buf;
+    }
+  };
+  return {
+    width: 0,
+    height: 0,
+    getContext() {
+      return ctx;
+    }
+  };
+}
+
+async function runScannerDecoderTests() {
+  const { normalizeScannedCode, decodeFromImageData, scanVideoFrame } = loadScannerModule();
+
+  assert.deepEqual(normalizeScannedCode('https://kitchen.local/item?s=aaa-0001'), {
+    code: 'AAA-0001',
+    kind: 'serial'
+  });
+  assert.deepEqual(normalizeScannedCode('5901234123457'), {
+    code: '5901234123457',
+    kind: 'ean'
+  });
+  assert.equal(normalizeScannedCode('przypadkowy napis'), null);
+
+  // Jednorodne tło bez kontrastu nie powinno generować fałszywych odczytów
+  assert.equal(decodeFromImageData(makeSolidImageData(320, 240)), null);
+
+  // QR standardowy oraz odwrócony (biały na ciemnym tle)
+  const qrImg = makeSolidImageData(320, 320);
+  drawQrIntoImage(qrImg, 'AAA-0001', { offsetX: 50, offsetY: 50, modulePx: 6 });
+  assert.equal(decodeFromImageData(qrImg), 'AAA-0001');
+
+  const invertedQrImg = makeSolidImageData(320, 320, 20, 20, 20);
+  drawQrIntoImage(invertedQrImg, 'KAT-0012', { offsetX: 50, offsetY: 50, modulePx: 6, invert: true });
+  assert.equal(decodeFromImageData(invertedQrImg), 'KAT-0012');
+
+  // Kod EAN-13 ze wszystkimi liniami skanowania
+  const eanImg = makeSolidImageData(420, 200);
+  drawEan13IntoImage(eanImg, '5901234123457', { offsetX: 65, offsetY: 45, barWidth: 3, barHeight: 110 });
+  assert.equal(decodeFromImageData(eanImg), '5901234123457');
+
+  // Symulacja klatki wideo HD na żywo z małym kodem QR w centrum (wymusza 1:1 crop bez degradacji)
+  const hdQrFrame = makeSolidImageData(1280, 720);
+  drawQrIntoImage(hdQrFrame, 'BBB-0042', { offsetX: 560, offsetY: 280, modulePx: 5 });
+  const qrLiveRes = await scanVideoFrame(
+    { readyState: 4, videoWidth: 1280, videoHeight: 720 },
+    createMockCanvasFromFrame(hdQrFrame)
+  );
+  assert.equal(qrLiveRes, 'BBB-0042');
+
+  // Symulacja klatki wideo HD na żywo z kodem EAN-13
+  const hdEanFrame = makeSolidImageData(1280, 720);
+  drawEan13IntoImage(hdEanFrame, '5901234123457', { offsetX: 495, offsetY: 290, barWidth: 3, barHeight: 140 });
+  const eanLiveRes = await scanVideoFrame(
+    { readyState: 4, videoWidth: 1280, videoHeight: 720 },
+    createMockCanvasFromFrame(hdEanFrame)
+  );
+  assert.equal(eanLiveRes, '5901234123457');
 }
 
 runTests().catch((err) => {

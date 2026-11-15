@@ -132,6 +132,7 @@ export function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const scanLoopRef = useRef<number | null>(null);
+  const cameraSessionRef = useRef<number>(0);
   const photoInputRef = useRef<HTMLInputElement | null>(null);
   const eanPhotoInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -369,6 +370,7 @@ export function App() {
 
   // Stop camera when leaving scanner view
   const stopCamera = useCallback(() => {
+    cameraSessionRef.current += 1;
     if (scanLoopRef.current) {
       window.cancelAnimationFrame(scanLoopRef.current);
       scanLoopRef.current = null;
@@ -518,143 +520,162 @@ export function App() {
   }, [handleCodeDetected]);
 
   // Start live camera scanner
-  const startCamera = useCallback(
-    async (forEanInAdd = false) => {
-      setEanScannerTarget(forEanInAdd);
-      setPendingDetectedCode(null);
-      if (forEanInAdd) {
-        setCurrentView('scanner');
+  const startCamera = useCallback(async () => {
+    setPendingDetectedCode(null);
+
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      setCameraStatusText(
+        'Przeglądarka wymaga HTTPS dla kamery na żywo. Użyj przycisku "Zrób zdjęcie" poniżej (działa po HTTP na iOS).'
+      );
+      return;
+    }
+
+    stopCamera();
+    const sessionId = cameraSessionRef.current;
+    setCameraStatusText('Uruchamianie kamery...');
+
+    try {
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
+          audio: false,
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
       }
 
-      if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
-        setCameraStatusText(
-          'Przeglądarka wymaga HTTPS dla kamery na żywo. Użyj przycisku "Zrób zdjęcie kodu" poniżej (działa po HTTP na iOS).'
-        );
+      if (sessionId !== cameraSessionRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
         return;
       }
 
-      stopCamera();
-      setCameraStatusText('Uruchamianie kamery...');
-
-      try {
-        let stream: MediaStream;
+      const [track] = stream.getVideoTracks();
+      if (
+        track &&
+        typeof track.getCapabilities === 'function' &&
+        typeof track.applyConstraints === 'function'
+      ) {
         try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-              facingMode: { ideal: 'environment' },
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-            },
-            audio: false,
-          });
+          const caps = track.getCapabilities() as MediaTrackCapabilities & {
+            focusMode?: string[];
+          };
+          if (Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
+            await track.applyConstraints({
+              advanced: [{ focusMode: 'continuous' } as MediaTrackConstraintSet],
+            });
+          }
         } catch {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: true,
-            audio: false,
-          });
+          // ignore unsupported continuous focus constraint
         }
+      }
 
-        streamRef.current = stream;
+      if (sessionId !== cameraSessionRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
 
-        // Wait up to 150ms if scanner view is just mounting
-        let attempts = 0;
-        while (!videoRef.current && attempts < 10) {
-          await new Promise((r) => setTimeout(r, 20));
-          attempts++;
-        }
+      streamRef.current = stream;
 
-        const videoEl = videoRef.current;
-        if (!videoEl) {
-          stopCamera();
-          return;
-        }
+      // Wait briefly if scanner view is still mounting
+      let attempts = 0;
+      while (!videoRef.current && attempts < 15 && sessionId === cameraSessionRef.current) {
+        await new Promise((r) => setTimeout(r, 20));
+        attempts++;
+      }
 
-        videoEl.srcObject = stream;
-        videoEl.setAttribute('playsinline', 'true');
-        videoEl.muted = true;
-        await videoEl.play().catch(() => {});
+      const videoEl = videoRef.current;
+      if (!videoEl || sessionId !== cameraSessionRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        if (streamRef.current === stream) streamRef.current = null;
+        return;
+      }
 
-        setCameraActive(true);
-        setCameraStatusText('Skieruj kamerę na kod QR (AAA-1111) lub kod EAN...');
+      videoEl.srcObject = stream;
+      videoEl.setAttribute('playsinline', 'true');
+      videoEl.setAttribute('webkit-playsinline', 'true');
+      videoEl.autoplay = true;
+      videoEl.muted = true;
+      await videoEl.play().catch(() => {});
 
-        const offscreen = document.createElement('canvas');
-        let busy = false;
-        let candidateCode = '';
-        let candidateHits = 0;
-        let lastCandidateTime = 0;
+      if (sessionId !== cameraSessionRef.current) {
+        stopCamera();
+        return;
+      }
 
-        const tick = () => {
-          const video = videoRef.current;
-          if (!video || !streamRef.current) return;
+      setCameraActive(true);
+      setCameraStatusText('Skieruj kamerę na kod QR (AAA-1111) lub kod EAN...');
 
-          if (!busy && video.readyState >= 2 && video.videoWidth > 0) {
-            busy = true;
-            scanVideoFrame(video, offscreen)
-              .then((detected) => {
-                busy = false;
-                if (detected && streamRef.current) {
-                  const normalized = normalizeScannedCode(detected);
-                  if (normalized) {
-                    const now = Date.now();
-                    if (normalized.code === candidateCode && now - lastCandidateTime < 1500) {
-                      candidateHits += 1;
-                    } else {
-                      candidateCode = normalized.code;
-                      candidateHits = 1;
-                    }
-                    lastCandidateTime = now;
+      const offscreen = document.createElement('canvas');
+      let busy = false;
 
-                    // Multi-frame verification: require 2 consecutive hits for QR, 3 for 1D EAN
-                    const requiredFrames = normalized.kind === 'serial' ? 2 : 3;
-                    if (candidateHits >= requiredFrames) {
-                      stopCamera();
-                      setPendingDetectedCode(normalized);
-                      setCameraStatusText(
-                        normalized.kind === 'serial'
-                          ? `Wykryto kod QR: ${normalized.code} — potwierdź poniżej`
-                          : `Wykryto kod EAN: ${normalized.code} — potwierdź poniżej`
-                      );
-                    }
-                  }
+      const tick = () => {
+        const video = videoRef.current;
+        if (!video || !streamRef.current || sessionId !== cameraSessionRef.current) return;
+
+        if (!busy && video.readyState >= 2 && video.videoWidth > 0) {
+          busy = true;
+          scanVideoFrame(video, offscreen)
+            .then((detected) => {
+              busy = false;
+              if (detected && streamRef.current && sessionId === cameraSessionRef.current) {
+                const normalized = normalizeScannedCode(detected);
+                if (normalized) {
+                  stopCamera();
+                  setPendingDetectedCode(normalized);
+                  setCameraStatusText(
+                    normalized.kind === 'serial'
+                      ? `Wykryto kod QR: ${normalized.code} — potwierdź poniżej`
+                      : `Wykryto kod EAN: ${normalized.code} — potwierdź poniżej`
+                  );
                 }
-              })
-              .catch(() => {
-                busy = false;
-              });
-          }
-          if (streamRef.current) {
-            scanLoopRef.current = window.requestAnimationFrame(tick);
-          }
-        };
+              }
+            })
+            .catch(() => {
+              busy = false;
+            });
+        }
+        if (streamRef.current && sessionId === cameraSessionRef.current) {
+          scanLoopRef.current = window.requestAnimationFrame(tick);
+        }
+      };
 
-        scanLoopRef.current = window.requestAnimationFrame(tick);
-      } catch {
+      scanLoopRef.current = window.requestAnimationFrame(tick);
+    } catch {
+      if (sessionId === cameraSessionRef.current) {
         setCameraStatusText(
-          'Brak dostępu do kamery na żywo. Użyj przycisku "Zrób zdjęcie kodu" (działa na iOS przez HTTP).'
+          'Brak dostępu do kamery na żywo. Użyj przycisku "Zrób zdjęcie" (działa na iOS przez HTTP).'
         );
       }
-    },
-    [stopCamera]
-  );
+    }
+  }, [stopCamera]);
 
   // Auto-start camera when entering scanner view, stop when leaving
   useEffect(() => {
     if (currentView === 'scanner') {
       if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
-        startCamera(eanScannerTarget);
+        void startCamera();
       } else {
         setCameraStatusText(
-          'Na połączeniu HTTP (iOS Safari) kliknij "Zrób zdjęcie kodu", aby użyć aparatu.'
+          'Na połączeniu HTTP (iOS Safari) kliknij "Zrób zdjęcie", aby użyć aparatu.'
         );
       }
     } else {
       stopCamera();
       setPendingDetectedCode(null);
+      setEanScannerTarget(false);
     }
     return () => {
       stopCamera();
     };
-  }, [currentView, eanScannerTarget, startCamera, stopCamera]);
+  }, [currentView, startCamera, stopCamera]);
 
   // Decode from photo file (iOS HTTP fallback & high-res photo decoder)
   const handlePhotoCapture = (e: React.ChangeEvent<HTMLInputElement>, fromAddTab = false) => {
@@ -1228,7 +1249,7 @@ export function App() {
                       id="inventorySearchInput"
                       name="q"
                       type="search"
-                      placeholder="Szukaj po nazwie, marce, numerze AAA-1111 lub EAN..."
+                      placeholder="Szukaj..."
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       autoComplete="off"
@@ -1353,17 +1374,17 @@ export function App() {
             <section className="view-panel">
               <div className="scanner-layout">
                 <div className="scanner-card card">
-                  <div className="scanner-header">
+                  <div className="card-section-header">
                     <h2>Skanuj etykietę QR lub kod EAN</h2>
-                    <p className="muted-text">
-                      Zeskanowanie kodu <strong>AAA-1111</strong> otwiera kartę produktu z szybkim
-                      usunięciem, edycją lub dodrukiem. Zeskanowanie kodu <strong>EAN</strong>{' '}
-                      wypełnia formularz dodawania.
+                    <p>
+                      {eanScannerTarget
+                        ? 'Tryb skanowania EAN: po odczytaniu kod automatycznie uzupełni formularz Dodaj.'
+                        : 'Zeskanowanie kodu AAA-1111 otwiera kartę produktu. Zeskanowanie kodu EAN uzupełnia formularz dodawania.'}
                     </p>
                   </div>
 
                   <div className="camera-viewport">
-                    <video ref={videoRef} playsInline muted />
+                    <video ref={videoRef} autoPlay playsInline muted />
                     <div className="scan-reticle" aria-hidden="true" />
                     {!cameraActive && (
                       <div className="camera-placeholder">
@@ -1381,8 +1402,8 @@ export function App() {
                       <div className="scanner-confirm-info">
                         <span className="scanner-confirm-label">
                           {pendingDetectedCode.kind === 'serial'
-                            ? 'Wykryto etykietę magazynową QR'
-                            : 'Wykryto kod kreskowy EAN'}
+                            ? 'Wykryto etykietę QR'
+                            : 'Wykryto kod EAN'}
                         </span>
                         <span className="serial-chip large">{pendingDetectedCode.code}</span>
                       </div>
@@ -1396,9 +1417,7 @@ export function App() {
                             handleCodeDetected(codeToOpen);
                           }}
                         >
-                          {pendingDetectedCode.kind === 'serial'
-                            ? `Potwierdź i otwórz (${pendingDetectedCode.code})`
-                            : `Potwierdź i użyj EAN (${pendingDetectedCode.code})`}
+                          {`Potwierdź (${pendingDetectedCode.code})`}
                         </button>
                         <button
                           type="button"
@@ -1409,13 +1428,13 @@ export function App() {
                               navigator.mediaDevices &&
                               typeof navigator.mediaDevices.getUserMedia === 'function'
                             ) {
-                              startCamera(eanScannerTarget);
+                              void startCamera();
                             } else {
                               setCameraStatusText('Kamera wyłączona');
                             }
                           }}
                         >
-                          Odrzuć i skanuj dalej
+                          Odrzuć
                         </button>
                       </div>
                     </div>
@@ -1431,17 +1450,17 @@ export function App() {
                             navigator.mediaDevices &&
                             typeof navigator.mediaDevices.getUserMedia === 'function'
                           ) {
-                            startCamera(eanScannerTarget);
+                            void startCamera();
                           } else {
                             photoInputRef.current?.click();
                           }
                         }}
                       >
-                        Uruchom kamerę na żywo
+                        Kamera na żywo
                       </button>
                     ) : (
                       <button type="button" className="btn btn-secondary" onClick={stopCamera}>
-                        Zatrzymaj kamerę
+                        Zatrzymaj
                       </button>
                     )}
 
@@ -1450,7 +1469,7 @@ export function App() {
                       className="btn btn-outline"
                       onClick={() => photoInputRef.current?.click()}
                     >
-                      Zrób zdjęcie kodu (iOS HTTP)
+                      Zrób zdjęcie
                     </button>
                     <input
                       ref={photoInputRef}
@@ -1464,11 +1483,13 @@ export function App() {
                 </div>
 
                 <div className="manual-scan-card card">
-                  <h3>Wpisz kod ręcznie lub użyj czytnika USB / Bluetooth</h3>
-                  <p className="muted-text">
-                    Wprowadź numer seryjny (np. <code>AAA-0001</code> lub <code>1</code>) albo kod
-                    kreskowy EAN-13.
-                  </p>
+                  <div className="card-section-header">
+                    <h3>Wpisz kod ręcznie lub użyj czytnika</h3>
+                    <p>
+                      Wprowadź numer seryjny (np. <code>AAA-0001</code> lub <code>1</code>) albo kod
+                      kreskowy EAN-13.
+                    </p>
+                  </div>
                   <form
                     className="manual-lookup-row"
                     onSubmit={(e) => {
@@ -1478,7 +1499,7 @@ export function App() {
                   >
                     <input
                       type="text"
-                      placeholder="np. AAA-0001, 1 lub 5900512300108"
+                      placeholder="np. AAA-0001 lub 5900512300108"
                       value={manualScanCode}
                       onChange={(e) => setManualScanCode(e.target.value)}
                       autoCapitalize="characters"
@@ -1498,20 +1519,20 @@ export function App() {
           {/* VIEW 4: ADD ITEM */}
           {currentView === 'add' && (
             <section className="view-panel">
-              <form className="card form-card" onSubmit={handleAddSubmit}>
-                <div className="section-header">
-                  <div>
-                    <h2>Nowa pozycja magazynowa</h2>
+              <form className="form-stack" onSubmit={handleAddSubmit}>
+                <div className="card">
+                  <div className="card-section-header">
+                    <h2>Kod kreskowy EAN</h2>
                     <p>
-                      Kolejny numer seryjny: <strong>{stats.next_serial}</strong>. Po zapisaniu
-                      etykieta QR zostanie przygotowana do wydruku.
+                      Kolejny numer seryjny: <strong>{stats.next_serial}</strong>. Zeskanuj lub
+                      wpisz kod EAN, aby pobrać dane produktu.
                     </p>
                   </div>
-                </div>
 
-                <div className="ean-lookup-banner">
                   <div className="form-field">
-                    <label htmlFor="eanInputField">Kod kreskowy EAN (Polska baza produktów)</label>
+                    <label htmlFor="eanInputField" className="visually-hidden">
+                      Kod kreskowy EAN
+                    </label>
                     <div className="ean-input-group">
                       <input
                         id="eanInputField"
@@ -1522,29 +1543,32 @@ export function App() {
                         onChange={(e) => setEanInput(e.target.value)}
                         autoComplete="off"
                       />
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={() => lookupEanCode()}
-                      >
-                        Pobierz dane EAN
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-outline"
-                        onClick={() => {
-                          if (
-                            navigator.mediaDevices &&
-                            typeof navigator.mediaDevices.getUserMedia === 'function'
-                          ) {
-                            startCamera(true);
-                          } else {
-                            eanPhotoInputRef.current?.click();
-                          }
-                        }}
-                      >
-                        Skanuj aparatem
-                      </button>
+                      <div className="ean-actions-grid">
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() => lookupEanCode()}
+                        >
+                          Pobierz EAN
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-outline"
+                          onClick={() => {
+                            if (
+                              navigator.mediaDevices &&
+                              typeof navigator.mediaDevices.getUserMedia === 'function'
+                            ) {
+                              setEanScannerTarget(true);
+                              setCurrentView('scanner');
+                            } else {
+                              eanPhotoInputRef.current?.click();
+                            }
+                          }}
+                        >
+                          Skanuj kod
+                        </button>
+                      </div>
                       <input
                         ref={eanPhotoInputRef}
                         type="file"
@@ -1578,190 +1602,208 @@ export function App() {
                   )}
                 </div>
 
-                <div className="form-grid">
-                  <div className="form-field full-width">
-                    <label htmlFor="itemNameInput">Nazwa produktu *</label>
-                    <input
-                      id="itemNameInput"
-                      type="text"
-                      required
-                      placeholder="np. Mleko UHT 3,2%"
-                      value={addName}
-                      onChange={(e) => setAddName(e.target.value)}
-                      autoComplete="off"
-                    />
+                <div className="card">
+                  <div className="card-section-header">
+                    <h3>Dane produktu i lokalizacja</h3>
+                    <p>Podstawowe informacje o produkcie i miejscu jego przechowywania.</p>
                   </div>
 
-                  <div className="form-field">
-                    <label htmlFor="itemBrandInput">Marka / Producent</label>
-                    <input
-                      id="itemBrandInput"
-                      type="text"
-                      placeholder="np. Mlekovita, Łowicz, Pudliszki"
-                      value={addBrand}
-                      onChange={(e) => setAddBrand(e.target.value)}
-                      autoComplete="off"
-                    />
-                  </div>
-
-                  <div className="form-field">
-                    <label htmlFor="itemCategorySelect">Kategoria</label>
-                    <select
-                      id="itemCategorySelect"
-                      value={addCategory}
-                      onChange={(e) => setAddCategory(e.target.value)}
-                    >
-                      {categories.map((cat) => (
-                        <option key={cat} value={cat}>
-                          {cat}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <fieldset className="form-field full-width">
-                    <legend>Lokalizacja w kuchni</legend>
-                    <div className="segmented-locations">
-                      {locations.map((loc) => (
-                        <label key={loc} className="seg-option">
-                          <input
-                            type="radio"
-                            name="locationRadio"
-                            value={loc}
-                            checked={addLocation === loc}
-                            onChange={() => setAddLocation(loc)}
-                          />
-                          <span>{loc}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </fieldset>
-
-                  <div className="form-field">
-                    <label htmlFor="itemQuantityInput">Ilość w opakowaniu</label>
-                    <input
-                      id="itemQuantityInput"
-                      type="number"
-                      step="0.01"
-                      min="0.01"
-                      value={addQuantity}
-                      onChange={(e) => setAddQuantity(e.target.value)}
-                    />
-                  </div>
-
-                  <div className="form-field">
-                    <label htmlFor="itemUnitSelect">Jednostka</label>
-                    <select
-                      id="itemUnitSelect"
-                      value={addUnit}
-                      onChange={(e) => setAddUnit(e.target.value)}
-                    >
-                      <option value="szt.">szt. (sztuki)</option>
-                      <option value="opak.">opak. (opakowanie)</option>
-                      <option value="l">l (litry)</option>
-                      <option value="ml">ml (mililitry)</option>
-                      <option value="kg">kg (kilogramy)</option>
-                      <option value="g">g (gramy)</option>
-                      <option value="słoik">słoik</option>
-                      <option value="puszka">puszka</option>
-                    </select>
-                  </div>
-
-                  <div className="form-field">
-                    <label htmlFor="itemExpiryInput">Data ważności</label>
-                    <input
-                      id="itemExpiryInput"
-                      type="date"
-                      value={addExpiryDate}
-                      onChange={(e) => setAddExpiryDate(e.target.value)}
-                    />
-                    <div className="date-Quick-row">
-                      <button
-                        type="button"
-                        className="chip-btn"
-                        onClick={() => applyQuickExpiryDays(3)}
-                      >
-                        +3 dni
-                      </button>
-                      <button
-                        type="button"
-                        className="chip-btn"
-                        onClick={() => applyQuickExpiryDays(7)}
-                      >
-                        +7 dni
-                      </button>
-                      <button
-                        type="button"
-                        className="chip-btn"
-                        onClick={() => applyQuickExpiryDays(14)}
-                      >
-                        +14 dni
-                      </button>
-                      <button
-                        type="button"
-                        className="chip-btn"
-                        onClick={() => applyQuickExpiryDays(30)}
-                      >
-                        +1 mies.
-                      </button>
-                      <button
-                        type="button"
-                        className="chip-btn"
-                        onClick={() => applyQuickExpiryDays(180)}
-                      >
-                        +6 mies.
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="form-field">
-                    <label htmlFor="labelsCountInput">Liczba sztuk (osobne numery AAA-1111)</label>
-                    <input
-                      id="labelsCountInput"
-                      type="number"
-                      min="1"
-                      max="50"
-                      value={addLabelsCount}
-                      onChange={(e) => setAddLabelsCount(e.target.value)}
-                    />
-                  </div>
-
-                  <div className="form-field full-width">
-                    <label htmlFor="itemNotesInput">Notatka (opcjonalnie)</label>
-                    <input
-                      id="itemNotesInput"
-                      type="text"
-                      placeholder="np. Domowy przecier, otwarte 2 dni temu"
-                      value={addNotes}
-                      onChange={(e) => setAddNotes(e.target.value)}
-                      autoComplete="off"
-                    />
-                  </div>
-
-                  <div className="form-field full-width checkbox-row">
-                    <label className="checkbox-label">
+                  <div className="form-grid">
+                    <div className="form-field full-width">
+                      <label htmlFor="itemNameInput">Nazwa produktu *</label>
                       <input
-                        type="checkbox"
-                        checked={addAutoPrint}
-                        onChange={(e) => setAddAutoPrint(e.target.checked)}
+                        id="itemNameInput"
+                        type="text"
+                        required
+                        placeholder="np. Mleko UHT 3,2%"
+                        value={addName}
+                        onChange={(e) => setAddName(e.target.value)}
+                        autoComplete="off"
                       />
-                      <span>
-                        Automatycznie wyślij etykietę QR do drukarki ({settings.printer_api_url})
-                      </span>
-                    </label>
+                    </div>
+
+                    <div className="form-field">
+                      <label htmlFor="itemBrandInput">Marka / Producent</label>
+                      <input
+                        id="itemBrandInput"
+                        type="text"
+                        placeholder="np. Mlekovita, Łowicz, Pudliszki"
+                        value={addBrand}
+                        onChange={(e) => setAddBrand(e.target.value)}
+                        autoComplete="off"
+                      />
+                    </div>
+
+                    <div className="form-field">
+                      <label htmlFor="itemCategorySelect">Kategoria</label>
+                      <select
+                        id="itemCategorySelect"
+                        value={addCategory}
+                        onChange={(e) => setAddCategory(e.target.value)}
+                      >
+                        {categories.map((cat) => (
+                          <option key={cat} value={cat}>
+                            {cat}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <fieldset className="form-field full-width">
+                      <legend>Lokalizacja w kuchni</legend>
+                      <div className="segmented-locations">
+                        {locations.map((loc) => (
+                          <label key={loc} className="seg-option">
+                            <input
+                              type="radio"
+                              name="locationRadio"
+                              value={loc}
+                              checked={addLocation === loc}
+                              onChange={() => setAddLocation(loc)}
+                            />
+                            <span>{loc}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </fieldset>
                   </div>
                 </div>
 
-                <div className="form-actions">
-                  <button
-                    type="submit"
-                    className="btn btn-primary btn-lg"
-                    disabled={submittingAdd}
-                  >
-                    {submittingAdd
-                      ? 'Zapisywanie...'
-                      : 'Dodaj do zapasów i generuj kod AAA-1111'}
-                  </button>
+                <div className="card">
+                  <div className="card-section-header">
+                    <h3>Ilość, ważność i etykieta QR</h3>
+                    <p>Parametry zapasu, termin przydatności oraz automatyczny wydruk etykiety.</p>
+                  </div>
+
+                  <div className="form-grid">
+                    <div className="form-field">
+                      <label htmlFor="itemQuantityInput">Ilość w opakowaniu</label>
+                      <input
+                        id="itemQuantityInput"
+                        type="number"
+                        step="0.01"
+                        min="0.01"
+                        value={addQuantity}
+                        onChange={(e) => setAddQuantity(e.target.value)}
+                      />
+                    </div>
+
+                    <div className="form-field">
+                      <label htmlFor="itemUnitSelect">Jednostka</label>
+                      <select
+                        id="itemUnitSelect"
+                        value={addUnit}
+                        onChange={(e) => setAddUnit(e.target.value)}
+                      >
+                        <option value="szt.">szt. (sztuki)</option>
+                        <option value="opak.">opak. (opakowanie)</option>
+                        <option value="l">l (litry)</option>
+                        <option value="ml">ml (mililitry)</option>
+                        <option value="kg">kg (kilogramy)</option>
+                        <option value="g">g (gramy)</option>
+                        <option value="słoik">słoik</option>
+                        <option value="puszka">puszka</option>
+                      </select>
+                    </div>
+
+                    <div className="form-field">
+                      <label htmlFor="itemExpiryInput">Data ważności</label>
+                      <input
+                        id="itemExpiryInput"
+                        type="date"
+                        value={addExpiryDate}
+                        onChange={(e) => setAddExpiryDate(e.target.value)}
+                      />
+                      <div className="date-Quick-row">
+                        <button
+                          type="button"
+                          className="chip-btn"
+                          onClick={() => applyQuickExpiryDays(3)}
+                        >
+                          +3 dni
+                        </button>
+                        <button
+                          type="button"
+                          className="chip-btn"
+                          onClick={() => applyQuickExpiryDays(7)}
+                        >
+                          +7 dni
+                        </button>
+                        <button
+                          type="button"
+                          className="chip-btn"
+                          onClick={() => applyQuickExpiryDays(14)}
+                        >
+                          +14 dni
+                        </button>
+                        <button
+                          type="button"
+                          className="chip-btn"
+                          onClick={() => applyQuickExpiryDays(30)}
+                        >
+                          +1 mies.
+                        </button>
+                        <button
+                          type="button"
+                          className="chip-btn"
+                          onClick={() => applyQuickExpiryDays(180)}
+                        >
+                          +6 mies.
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="form-field">
+                      <label htmlFor="labelsCountInput">Liczba sztuk (osobne numery AAA-1111)</label>
+                      <input
+                        id="labelsCountInput"
+                        type="number"
+                        min="1"
+                        max="50"
+                        value={addLabelsCount}
+                        onChange={(e) => setAddLabelsCount(e.target.value)}
+                      />
+                    </div>
+
+                    <div className="form-field full-width">
+                      <label htmlFor="itemNotesInput">Notatka (opcjonalnie)</label>
+                      <input
+                        id="itemNotesInput"
+                        type="text"
+                        placeholder="np. Domowy przecier, otwarte 2 dni temu"
+                        value={addNotes}
+                        onChange={(e) => setAddNotes(e.target.value)}
+                        autoComplete="off"
+                      />
+                    </div>
+
+                    <div className="form-field full-width">
+                      <label className="ios-switch-row" htmlFor="addAutoPrintSwitch">
+                        <span className="ios-switch-copy">
+                          <span>Automatycznie drukuj etykietę QR</span>
+                          <span className="field-hint">{settings.printer_api_url}</span>
+                        </span>
+                        <input
+                          id="addAutoPrintSwitch"
+                          type="checkbox"
+                          role="switch"
+                          className="ios-switch"
+                          checked={addAutoPrint}
+                          onChange={(e) => setAddAutoPrint(e.target.checked)}
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="form-actions">
+                    <button
+                      type="submit"
+                      className="btn btn-primary btn-lg"
+                      disabled={submittingAdd}
+                    >
+                      {submittingAdd ? 'Zapisywanie...' : 'Dodaj i generuj kod QR'}
+                    </button>
+                  </div>
                 </div>
               </form>
             </section>

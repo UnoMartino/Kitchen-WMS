@@ -1,4 +1,4 @@
-import React, { useRef, useId } from 'react';
+import React, { useRef, useId, useState, useEffect } from 'react';
 import { LabelStickerItem } from '../types';
 import { useDialogModal } from '../utils/dialogLightDismiss';
 
@@ -23,8 +23,17 @@ export function LabelsPreviewModal({
 }: LabelsPreviewModalProps) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const titleId = useId();
+  const [cachedItems, setCachedItems] = useState<LabelStickerItem[]>(items);
+
+  useEffect(() => {
+    if (items.length > 0) {
+      setCachedItems(items);
+    }
+  }, [items]);
 
   useDialogModal(dialogRef, isOpen, onClose);
+
+  const visibleItems = items.length > 0 ? items : cachedItems;
 
   return (
     <dialog
@@ -34,7 +43,7 @@ export function LabelsPreviewModal({
     >
       <div className="dialog-sheet">
         <div className="dialog-header">
-          <h2 id={titleId}>Etykiety QR ({items.length})</h2>
+          <h2 id={titleId}>Etykiety QR ({visibleItems.length})</h2>
           <button
             type="button"
             className="dialog-close-btn"
@@ -48,7 +57,7 @@ export function LabelsPreviewModal({
         <div className="dialog-body">
           {summaryText && <p className="card-desc">{summaryText}</p>}
           <div className="labels-preview-grid">
-            {items.map((item, idx) => (
+            {visibleItems.map((item, idx) => (
               <div key={`${item.serial_number}-${idx}`} className="label-sticker-card">
                 <div
                   className="label-sticker-qr"
@@ -71,10 +80,10 @@ export function LabelsPreviewModal({
 
         <div className="dialog-footer">
           <button type="button" className="btn-secondary" onClick={onReprintAllApi}>
-            Dodrukuj wszystkie przez API
+            Dodrukuj wszystkie
           </button>
-          <button type="button" className="btn-secondary" onClick={() => onBrowserPrint(items)}>
-            Drukuj w przeglądarce
+          <button type="button" className="btn-secondary" onClick={() => onBrowserPrint(visibleItems)}>
+            Drukuj
           </button>
           <button type="button" className="btn-primary" onClick={onClose}>
             Gotowe

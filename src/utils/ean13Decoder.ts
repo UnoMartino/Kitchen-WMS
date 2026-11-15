@@ -92,7 +92,7 @@ export function normalizeScannedCode(raw: string): NormalizedScanResult | null {
 function patternMatchVariance(
   counters: number[],
   pattern: number[],
-  maxIndividualVariance = 0.48
+  maxIndividualVariance = 0.54
 ): number {
   const numCounters = counters.length;
   let total = 0;
@@ -124,7 +124,7 @@ function decodeDigitRLE(
   counters: number[],
   includeG: boolean
 ): { digit: number; isG: boolean; variance: number } | null {
-  let bestVariance = 0.30;
+  let bestVariance = 0.36;
   let bestDigit = -1;
   let bestIsG = false;
 
@@ -190,18 +190,18 @@ function tryDecodeEan13FromRuns(runs: Run[]): string | null {
     // Quiet zone check: white runs immediately before Left Guard and after Right Guard
     const leftQuiet = runs[start - 1];
     const rightQuiet = runs[start + 59];
-    if (leftQuiet.val !== 0 || leftQuiet.len < moduleWidth * 3.5) continue;
-    if (rightQuiet.val !== 0 || rightQuiet.len < moduleWidth * 3.5) continue;
+    if (leftQuiet.val !== 0 || leftQuiet.len < moduleWidth * 2.0) continue;
+    if (rightQuiet.val !== 0 || rightQuiet.len < moduleWidth * 2.0) continue;
 
     // 1. Check Left Guard (101 -> [1, 1, 1], expected 3 modules)
     const lgWidth = runs[start].len + runs[start + 1].len + runs[start + 2].len;
-    if (lgWidth < moduleWidth * 1.9 || lgWidth > moduleWidth * 4.3) continue;
+    if (lgWidth < moduleWidth * 1.8 || lgWidth > moduleWidth * 4.5) continue;
     const lgVar = patternMatchVariance(
       [runs[start].len, runs[start + 1].len, runs[start + 2].len],
       [1, 1, 1],
-      0.5
+      0.54
     );
-    if (lgVar > 0.32) continue;
+    if (lgVar > 0.40) continue;
 
     // 2. Check Center Guard (01010 -> [1, 1, 1, 1, 1] at start + 27, expected 5 modules)
     const cgIdx = start + 27;
@@ -211,7 +211,7 @@ function tryDecodeEan13FromRuns(runs: Run[]): string | null {
       runs[cgIdx + 2].len +
       runs[cgIdx + 3].len +
       runs[cgIdx + 4].len;
-    if (cgWidth < moduleWidth * 3.3 || cgWidth > moduleWidth * 6.8) continue;
+    if (cgWidth < moduleWidth * 3.1 || cgWidth > moduleWidth * 7.0) continue;
     const cgVar = patternMatchVariance(
       [
         runs[cgIdx].len,
@@ -221,28 +221,28 @@ function tryDecodeEan13FromRuns(runs: Run[]): string | null {
         runs[cgIdx + 4].len,
       ],
       [1, 1, 1, 1, 1],
-      0.5
+      0.54
     );
-    if (cgVar > 0.32) continue;
+    if (cgVar > 0.40) continue;
 
     // 3. Check Right Guard (101 -> [1, 1, 1] at start + 56, expected 3 modules)
     const rgIdx = start + 56;
     const rgWidth = runs[rgIdx].len + runs[rgIdx + 1].len + runs[rgIdx + 2].len;
-    if (rgWidth < moduleWidth * 1.9 || rgWidth > moduleWidth * 4.3) continue;
+    if (rgWidth < moduleWidth * 1.8 || rgWidth > moduleWidth * 4.5) continue;
     const rgVar = patternMatchVariance(
       [runs[rgIdx].len, runs[rgIdx + 1].len, runs[rgIdx + 2].len],
       [1, 1, 1],
-      0.5
+      0.54
     );
-    if (rgVar > 0.32) continue;
+    if (rgVar > 0.40) continue;
 
     // 4. Decode 6 left digits (L or G), verifying consistent 7-module digit width
     let parity = '';
     const digits: number[] = [];
     let ok = true;
     let totalDigitVariance = 0;
-    const minDigitWidth = moduleWidth * 5.2;
-    const maxDigitWidth = moduleWidth * 8.8;
+    const minDigitWidth = moduleWidth * 4.9;
+    const maxDigitWidth = moduleWidth * 9.1;
 
     for (let d = 0; d < 6; d++) {
       const idx = start + 3 + d * 4;
@@ -289,7 +289,7 @@ function tryDecodeEan13FromRuns(runs: Run[]): string | null {
     }
 
     if (!ok) continue;
-    if (totalDigitVariance / 12 > 0.21) continue;
+    if (totalDigitVariance / 12 > 0.26) continue;
 
     if (validateEanChecksum(digits)) {
       return digits.join('');
@@ -316,17 +316,17 @@ function tryDecodeEan8FromRuns(runs: Run[]): string | null {
     // Quiet zone check
     const leftQuiet = runs[start - 1];
     const rightQuiet = runs[start + 43];
-    if (leftQuiet.val !== 0 || leftQuiet.len < moduleWidth * 3.5) continue;
-    if (rightQuiet.val !== 0 || rightQuiet.len < moduleWidth * 3.5) continue;
+    if (leftQuiet.val !== 0 || leftQuiet.len < moduleWidth * 2.0) continue;
+    if (rightQuiet.val !== 0 || rightQuiet.len < moduleWidth * 2.0) continue;
 
     const lgWidth = runs[start].len + runs[start + 1].len + runs[start + 2].len;
-    if (lgWidth < moduleWidth * 1.9 || lgWidth > moduleWidth * 4.3) continue;
+    if (lgWidth < moduleWidth * 1.8 || lgWidth > moduleWidth * 4.5) continue;
     const lgVar = patternMatchVariance(
       [runs[start].len, runs[start + 1].len, runs[start + 2].len],
       [1, 1, 1],
-      0.5
+      0.54
     );
-    if (lgVar > 0.30) continue;
+    if (lgVar > 0.40) continue;
 
     const cgIdx = start + 19;
     const cgWidth =
@@ -335,7 +335,7 @@ function tryDecodeEan8FromRuns(runs: Run[]): string | null {
       runs[cgIdx + 2].len +
       runs[cgIdx + 3].len +
       runs[cgIdx + 4].len;
-    if (cgWidth < moduleWidth * 3.3 || cgWidth > moduleWidth * 6.8) continue;
+    if (cgWidth < moduleWidth * 3.1 || cgWidth > moduleWidth * 7.0) continue;
     const cgVar = patternMatchVariance(
       [
         runs[cgIdx].len,
@@ -345,25 +345,25 @@ function tryDecodeEan8FromRuns(runs: Run[]): string | null {
         runs[cgIdx + 4].len,
       ],
       [1, 1, 1, 1, 1],
-      0.5
+      0.54
     );
-    if (cgVar > 0.30) continue;
+    if (cgVar > 0.40) continue;
 
     const rgIdx = start + 40;
     const rgWidth = runs[rgIdx].len + runs[rgIdx + 1].len + runs[rgIdx + 2].len;
-    if (rgWidth < moduleWidth * 1.9 || rgWidth > moduleWidth * 4.3) continue;
+    if (rgWidth < moduleWidth * 1.8 || rgWidth > moduleWidth * 4.5) continue;
     const rgVar = patternMatchVariance(
       [runs[rgIdx].len, runs[rgIdx + 1].len, runs[rgIdx + 2].len],
       [1, 1, 1],
-      0.5
+      0.54
     );
-    if (rgVar > 0.30) continue;
+    if (rgVar > 0.40) continue;
 
     const digits: number[] = [];
     let ok = true;
     let totalDigitVariance = 0;
-    const minDigitWidth = moduleWidth * 5.2;
-    const maxDigitWidth = moduleWidth * 8.8;
+    const minDigitWidth = moduleWidth * 4.9;
+    const maxDigitWidth = moduleWidth * 9.1;
 
     for (let d = 0; d < 4; d++) {
       const idx = start + 3 + d * 4;
@@ -407,7 +407,7 @@ function tryDecodeEan8FromRuns(runs: Run[]): string | null {
     }
 
     if (!ok) continue;
-    if (totalDigitVariance / 8 > 0.20) continue;
+    if (totalDigitVariance / 8 > 0.26) continue;
 
     if (validateEanChecksum(digits)) {
       return digits.join('');
@@ -428,7 +428,7 @@ function binarizeCentered(grayRow: Uint8Array, radius: number, bias: number): Ui
     const right = Math.min(len - 1, i + radius);
     const avg = (prefix[right + 1] - prefix[left]) / (right - left + 1);
     // Require pixel to be meaningfully darker than local mean so uniform/quiet zones stay 0
-    bin[i] = grayRow[i] < avg * bias && avg - grayRow[i] >= 6 ? 1 : 0;
+    bin[i] = grayRow[i] < avg * bias && avg - grayRow[i] >= 5 ? 1 : 0;
   }
   return bin;
 }
@@ -445,10 +445,14 @@ function decodeGrayLine(grayLine: Uint8Array): string | null {
     if (v < minVal) minVal = v;
     if (v > maxVal) maxVal = v;
   }
-  if (maxVal - minVal < 55) return null;
+  if (maxVal - minVal < 36) return null;
 
-  const radii = [Math.max(14, Math.floor(len / 20)), Math.max(28, Math.floor(len / 10))];
-  const biases = [0.95, 0.90];
+  const radii = [
+    Math.max(12, Math.floor(len / 24)),
+    Math.max(20, Math.floor(len / 14)),
+    Math.max(32, Math.floor(len / 8)),
+  ];
+  const biases = [0.97, 0.92, 0.86];
 
   for (const radius of radii) {
     for (const bias of biases) {
@@ -474,20 +478,25 @@ function decodeGrayLine(grayLine: Uint8Array): string | null {
   return null;
 }
 
-const MIN_SCANLINE_VOTES = 3;
+const MIN_SCANLINE_VOTES = 2;
+
+const HORIZONTAL_RATIOS = [
+  0.5, 0.48, 0.52, 0.46, 0.54, 0.44, 0.56, 0.42, 0.58, 0.4, 0.6, 0.38, 0.62, 0.36, 0.64, 0.34,
+  0.66, 0.32, 0.68, 0.3, 0.7, 0.27, 0.73, 0.24, 0.76, 0.2, 0.8, 0.15, 0.85,
+];
+
+const VERTICAL_RATIOS = [
+  0.5, 0.46, 0.54, 0.42, 0.58, 0.38, 0.62, 0.34, 0.66, 0.3, 0.7, 0.26, 0.74, 0.21, 0.79, 0.15,
+  0.85,
+];
 
 export function decodeEanFromImageData(imageData: ImageData): string | null {
   const { data, width, height } = imageData;
   if (width < 110 || height < 60) return null;
 
-  // Scan 19 horizontal lines across the frame
-  const ratios = [
-    0.5, 0.45, 0.55, 0.4, 0.6, 0.35, 0.65, 0.3, 0.7, 0.25, 0.75, 0.2, 0.8, 0.48, 0.52, 0.42, 0.58,
-    0.15, 0.85,
-  ];
   const votes: Record<string, number> = {};
 
-  for (const ratio of ratios) {
+  for (const ratio of HORIZONTAL_RATIOS) {
     const y = Math.floor(height * ratio);
     if (y < 0 || y >= height) continue;
     const grayRow = new Uint8Array(width);
@@ -505,7 +514,7 @@ export function decodeEanFromImageData(imageData: ImageData): string | null {
 
   // Also scan vertical columns (for barcodes held vertically / 90 deg on mobile)
   if (height >= 110) {
-    for (const ratio of ratios) {
+    for (const ratio of VERTICAL_RATIOS) {
       const x = Math.floor(width * ratio);
       if (x < 0 || x >= width) continue;
       const grayCol = new Uint8Array(height);
@@ -563,7 +572,7 @@ function getNativeBarcodeDetector(): BarcodeDetectorLike | null {
 
 export function decodeFromImageData(imageData: ImageData): string | null {
   const qr = jsQR(imageData.data, imageData.width, imageData.height, {
-    inversionAttempts: 'dontInvert',
+    inversionAttempts: 'attemptBoth',
   });
   if (qr && qr.data) {
     const normalizedQr = normalizeScannedCode(qr.data);
@@ -612,33 +621,44 @@ export async function scanVideoFrame(
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) return null;
 
-  // 2. Full frame scaled to max 720px
-  const maxDim = 720;
-  const scale = Math.min(1, maxDim / Math.max(vw, vh));
-  const w1 = Math.max(1, Math.round(vw * scale));
-  const h1 = Math.max(1, Math.round(vh * scale));
+  // 2. Pass 1 — 1:1 native-resolution center reticle crop (68% of frame, capped at 1000px)
+  const crop1Ratio = 0.68;
+  const sx1 = Math.round(vw * ((1 - crop1Ratio) / 2));
+  const sy1 = Math.round(vh * ((1 - crop1Ratio) / 2));
+  const sw1 = Math.max(1, Math.round(vw * crop1Ratio));
+  const sh1 = Math.max(1, Math.round(vh * crop1Ratio));
+  const crop1Scale = Math.min(1, 1000 / Math.max(sw1, sh1));
+  const w1 = Math.max(1, Math.round(sw1 * crop1Scale));
+  const h1 = Math.max(1, Math.round(sh1 * crop1Scale));
   canvas.width = w1;
   canvas.height = h1;
-  ctx.drawImage(video, 0, 0, w1, h1);
-  const fullData = ctx.getImageData(0, 0, w1, h1);
-  const fullHit = decodeFromImageData(fullData);
-  if (fullHit) return fullHit;
+  ctx.drawImage(video, sx1, sy1, sw1, sh1, 0, 0, w1, h1);
+  const crop1Hit = decodeFromImageData(ctx.getImageData(0, 0, w1, h1));
+  if (crop1Hit) return crop1Hit;
 
-  // 3. Center reticle crop (60% of frame) magnified to 520px for small QR / EAN labels
-  const cropRatio = 0.6;
-  const sx = Math.round(vw * ((1 - cropRatio) / 2));
-  const sy = Math.round(vh * ((1 - cropRatio) / 2));
-  const sw = Math.max(1, Math.round(vw * cropRatio));
-  const sh = Math.max(1, Math.round(vh * cropRatio));
-  const targetCropDim = 520;
-  const cropScale = Math.min(1.5, targetCropDim / Math.max(sw, sh));
-  const w2 = Math.max(1, Math.round(sw * cropScale));
-  const h2 = Math.max(1, Math.round(sh * cropScale));
+  // 3. Pass 2 — High-res full frame (960px max dim)
+  const fullScale = Math.min(1, 960 / Math.max(vw, vh));
+  const w2 = Math.max(1, Math.round(vw * fullScale));
+  const h2 = Math.max(1, Math.round(vh * fullScale));
   canvas.width = w2;
   canvas.height = h2;
-  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, w2, h2);
-  const cropData = ctx.getImageData(0, 0, w2, h2);
-  return decodeFromImageData(cropData);
+  ctx.drawImage(video, 0, 0, w2, h2);
+  const fullHit = decodeFromImageData(ctx.getImageData(0, 0, w2, h2));
+  if (fullHit) return fullHit;
+
+  // 4. Pass 3 — Tight center crop (44% of frame scaled up to 640px) for small labels
+  const crop3Ratio = 0.44;
+  const sx3 = Math.round(vw * ((1 - crop3Ratio) / 2));
+  const sy3 = Math.round(vh * ((1 - crop3Ratio) / 2));
+  const sw3 = Math.max(1, Math.round(vw * crop3Ratio));
+  const sh3 = Math.max(1, Math.round(vh * crop3Ratio));
+  const crop3Scale = Math.min(2, 640 / Math.max(sw3, sh3));
+  const w3 = Math.max(1, Math.round(sw3 * crop3Scale));
+  const h3 = Math.max(1, Math.round(sh3 * crop3Scale));
+  canvas.width = w3;
+  canvas.height = h3;
+  ctx.drawImage(video, sx3, sy3, sw3, sh3, 0, 0, w3, h3);
+  return decodeFromImageData(ctx.getImageData(0, 0, w3, h3));
 }
 
 export async function scanStaticImage(img: HTMLImageElement): Promise<string | null> {
