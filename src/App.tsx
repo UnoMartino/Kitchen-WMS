@@ -160,18 +160,36 @@ export function App() {
   useEffect(() => {
     const mqDark = window.matchMedia('(prefers-color-scheme: dark)');
     const mqStandalone = window.matchMedia('(display-mode: standalone)');
+    const mqFullscreen = window.matchMedia('(display-mode: fullscreen)');
 
     const syncEnvironment = () => {
       const color = mqDark.matches ? '#000000' : '#f2f2f7';
       document.documentElement.style.backgroundColor = color;
       document.body.style.backgroundColor = color;
 
-      const isStandalone =
-        mqStandalone.matches ||
-        (window.navigator as Navigator & { standalone?: boolean }).standalone === true;
+      const metaLight = document.getElementById('meta-theme-light');
+      const metaDark = document.getElementById('meta-theme-dark');
+      if (metaLight) metaLight.setAttribute('content', '#f2f2f7');
+      if (metaDark) metaDark.setAttribute('content', '#000000');
+
+      let metaTheme = document.querySelector('meta[name="theme-color"]:not([media])');
+      if (!metaTheme) {
+        metaTheme = document.createElement('meta');
+        metaTheme.setAttribute('name', 'theme-color');
+        document.head.appendChild(metaTheme);
+      }
+      metaTheme.setAttribute('content', color);
+
       const isIOS =
         /iPad|iPhone|iPod/.test(navigator.userAgent) ||
         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      const isWebClipViewport =
+        isIOS && window.screen.height > 0 && window.screen.height - window.innerHeight < 45;
+      const isStandalone =
+        mqStandalone.matches ||
+        mqFullscreen.matches ||
+        (window.navigator as Navigator & { standalone?: boolean }).standalone === true ||
+        isWebClipViewport;
 
       document.documentElement.classList.toggle('pwa-standalone', isStandalone);
       document.documentElement.classList.toggle('ios-device', isIOS);
@@ -180,9 +198,13 @@ export function App() {
     syncEnvironment();
     mqDark.addEventListener('change', syncEnvironment);
     mqStandalone.addEventListener('change', syncEnvironment);
+    mqFullscreen.addEventListener('change', syncEnvironment);
+    window.addEventListener('resize', syncEnvironment);
     return () => {
       mqDark.removeEventListener('change', syncEnvironment);
       mqStandalone.removeEventListener('change', syncEnvironment);
+      mqFullscreen.removeEventListener('change', syncEnvironment);
+      window.removeEventListener('resize', syncEnvironment);
     };
   }, []);
 

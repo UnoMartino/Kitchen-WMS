@@ -2,37 +2,39 @@
   "id": "/",
   "name": "Spiżarnia — Magazyn Kuchenny WMS",
   "short_name": "Spiżarnia",
-  "description": "Zarządzanie zapasami kuchennymi, datami ważności, kodami QR i bazą EAN",
-  "lang": "pl",
+  "description": "System zarządzania zapasami kuchennymi, partiami, etykietami QR i przelicznikami jednostek.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
+  "orientation": "portrait-primary",
   "background_color": "#F2F2F7",
-  "theme_color": "#007AFF",
+  "theme_color": "#F2F2F7",
+  "lang": "pl",
+  "dir": "ltr",
   "icons": [
     {
-      "src": "/apple-touch-icon.png",
+      "src": "/apple-touch-icon.png?v=3",
       "sizes": "180x180",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icon-192.png",
+      "src": "/icon-192.png?v=3",
       "sizes": "192x192",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
     },
     {
-      "src": "/icon-512.png",
+      "src": "/icon-512.png?v=3",
       "sizes": "512x512",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
     },
     {
-      "src": "/icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any"
+      "src": "/icon-512.png?v=3",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

@@ -1009,6 +1009,13 @@ function createAppServer(customDbPath) {
       let relativePath = pathname === '/' ? '/index.html' : pathname;
       if (/^\/[A-Za-z]{3}-\d{4}$/.test(pathname)) {
         relativePath = '/index.html';
+      } else if (
+        /^\/favicon\.ico$/i.test(pathname) ||
+        (/^\/apple-touch-icon.*\.png$/i.test(pathname) &&
+          pathname !== '/apple-touch-icon.png' &&
+          pathname !== '/apple-touch-icon-precomposed.png')
+      ) {
+        relativePath = '/apple-touch-icon.png';
       }
 
       const safePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, '');
@@ -1027,14 +1034,21 @@ function createAppServer(customDbPath) {
       if (targetFile) {
         const ext = path.extname(targetFile).toLowerCase();
         const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-        res.writeHead(200, { 'Content-Type': contentType });
+        const headers = { 'Content-Type': contentType };
+        if (['.html', '.webmanifest', '.png', '.svg', '.ico'].includes(ext)) {
+          headers['Cache-Control'] = 'no-store, no-cache, must-revalidate';
+        }
+        res.writeHead(200, headers);
         return fs.createReadStream(targetFile).pipe(res);
       }
 
       // SPA fallback to dist/index.html for non-API GET routes
       const distIndex = path.join(DIST_DIR, 'index.html');
       if (method === 'GET' && !pathname.startsWith('/api/') && fs.existsSync(distIndex)) {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+        });
         return fs.createReadStream(distIndex).pipe(res);
       }
 

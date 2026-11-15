@@ -89,17 +89,23 @@
   --safe-right: env(safe-area-inset-right, 0px);
 }
 
-@media (max-width: 899px) and (display-mode: standalone) {
+@media (max-width: 899px) and (display-mode: standalone),
+  (max-width: 899px) and (display-mode: fullscreen) {
   :root {
-    --safe-top: max(env(safe-area-inset-top, 0px), 59px);
-    --safe-bottom: max(env(safe-area-inset-bottom, 0px), 20px);
+    --safe-top: 62px;
+    --safe-top: max(62px, env(safe-area-inset-top, 62px));
+    --safe-bottom: 20px;
+    --safe-bottom: max(20px, env(safe-area-inset-bottom, 20px));
   }
 }
 
 @media (max-width: 899px) {
-  html.pwa-standalone {
-    --safe-top: max(env(safe-area-inset-top, 0px), 59px);
-    --safe-bottom: max(env(safe-area-inset-bottom, 0px), 20px);
+  html.pwa-standalone,
+  html.ios-device {
+    --safe-top: 62px;
+    --safe-top: max(62px, env(safe-area-inset-top, 62px));
+    --safe-bottom: 20px;
+    --safe-bottom: max(20px, env(safe-area-inset-bottom, 20px));
   }
 }
 
@@ -351,6 +357,33 @@ button,
   padding-right: max(1rem, var(--safe-right));
   padding-bottom: calc(var(--tabbar-height) + var(--safe-bottom) + 1.5rem);
   overflow-x: clip;
+}
+
+@media (max-width: 899px) and (display-mode: standalone),
+  (max-width: 899px) and (display-mode: fullscreen) {
+  .topbar {
+    padding-top: 62px;
+    padding-top: max(62px, env(safe-area-inset-top, 62px));
+  }
+
+  .main-content {
+    padding-top: calc(var(--topbar-height) + 62px + 0.875rem);
+    padding-top: calc(var(--topbar-height) + max(62px, env(safe-area-inset-top, 62px)) + 0.875rem);
+  }
+}
+
+@media (max-width: 899px) {
+  html.pwa-standalone .topbar,
+  html.ios-device .topbar {
+    padding-top: 62px;
+    padding-top: max(62px, env(safe-area-inset-top, 62px));
+  }
+
+  html.pwa-standalone .main-content,
+  html.ios-device .main-content {
+    padding-top: calc(var(--topbar-height) + 62px + 0.875rem);
+    padding-top: calc(var(--topbar-height) + max(62px, env(safe-area-inset-top, 62px)) + 0.875rem);
+  }
 }
 
 .view-panel {
