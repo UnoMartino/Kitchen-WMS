@@ -1283,6 +1283,19 @@ export function App() {
     );
   };
 
+  const locationFilterOptions = [
+    { value: '', label: 'Wszystkie miejsca' },
+    ...locations.map((loc) => ({ value: loc, label: loc })),
+  ];
+  const locationPillSplitIdx = Math.ceil(locationFilterOptions.length / 2);
+  const locationPillRows =
+    locationFilterOptions.length > 1
+      ? [
+          locationFilterOptions.slice(0, locationPillSplitIdx),
+          locationFilterOptions.slice(locationPillSplitIdx),
+        ]
+      : [locationFilterOptions];
+
   return (
     <div className="app-shell">
       {/* Desktop / Tablet Sidebar */}
@@ -1484,23 +1497,23 @@ export function App() {
                 </div>
 
                 <div className="filter-controls-row">
-                  <div className="pill-scroll" role="tablist" aria-label="Filtr lokalizacji">
-                    <button
-                      type="button"
-                      className={`pill ${filterLocation === '' ? 'active' : ''}`}
-                      onClick={() => setFilterLocation('')}
-                    >
-                      Wszystkie miejsca
-                    </button>
-                    {locations.map((loc) => (
-                      <button
-                        key={loc}
-                        type="button"
-                        className={`pill ${filterLocation === loc ? 'active' : ''}`}
-                        onClick={() => setFilterLocation(filterLocation === loc ? '' : loc)}
-                      >
-                        {loc}
-                      </button>
+                  <div className="pill-scroll" role="group" aria-label="Filtr lokalizacji">
+                    {locationPillRows.map((row, rowIdx) => (
+                      <div key={rowIdx} className="pill-scroll-row">
+                        {row.map((opt) => (
+                          <button
+                            key={opt.value || '__all__'}
+                            type="button"
+                            aria-pressed={filterLocation === opt.value}
+                            className={`pill ${filterLocation === opt.value ? 'active' : ''}`}
+                            onClick={() =>
+                              setFilterLocation(filterLocation === opt.value ? '' : opt.value)
+                            }
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
                     ))}
                   </div>
 
