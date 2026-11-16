@@ -35,6 +35,7 @@ import {
   type DatabaseImportMode,
   type DatabaseImportRequest,
 } from './components/ConfirmImportModal';
+import { ConsumeCustomModal } from './components/ConsumeCustomModal';
 
 const DEFAULT_LOCATIONS = ['Lodówka', 'Zamrażarka', 'Spiżarnia', 'Szafka', 'Piwnica'];
 const DEFAULT_CATEGORIES = [
@@ -121,6 +122,7 @@ export function App() {
   // Modals
   const [activeItem, setActiveItem] = useState<InventoryItem | null>(null);
   const [activeItemQrSvg, setActiveItemQrSvg] = useState<string>('');
+  const [consumeCustomItem, setConsumeCustomItem] = useState<InventoryItem | null>(null);
   const [reprintOpen, setReprintOpen] = useState(false);
   const [reprintInitialSerials, setReprintInitialSerials] = useState<string[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -929,6 +931,7 @@ export function App() {
       const data = await res.json();
       if (res.ok) {
         if (data.deleted) {
+          setConsumeCustomItem(null);
           setActiveItem(null);
           refreshAll();
           if (data.activity_id) {
@@ -1054,7 +1057,6 @@ export function App() {
       }
 
       if (data.ok) {
-        setReprintOpen(false);
         showToast(`Wydrukowano serię etykiet (${data.printed_count} szt.)`);
       } else {
         showToast(
@@ -2107,7 +2109,10 @@ export function App() {
       {/* Modals */}
       <ItemModal
         isOpen={Boolean(activeItem)}
-        onClose={() => setActiveItem(null)}
+        onClose={() => {
+          setConsumeCustomItem(null);
+          setActiveItem(null);
+        }}
         item={activeItem}
         qrSvg={activeItemQrSvg}
         locations={locations}
@@ -2119,6 +2124,13 @@ export function App() {
         onUpdateItem={handleUpdateItem}
         onRequestPrint={requestSinglePrintConfirm}
         onSelectSibling={(sibling) => void openItemModal(sibling)}
+        onOpenCustomConsume={(item) => setConsumeCustomItem(item)}
+      />
+
+      <ConsumeCustomModal
+        item={consumeCustomItem}
+        onConfirm={handleConsumePartial}
+        onClose={() => setConsumeCustomItem(null)}
       />
 
       <ReprintModal

@@ -318,6 +318,24 @@ async function runTests() {
     assert.equal(pack100Consume.item.initial_quantity, 100);
     assert.equal(pack100Consume.item.percent_remaining, 75);
 
+    const pack100CustomDelta = await fetch(`${baseUrl}/api/items/${pack100Item.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'consume_partial', delta: 15 })
+    }).then((r) => r.json());
+    assert.equal(pack100CustomDelta.item.quantity, 60);
+    assert.equal(pack100CustomDelta.item.initial_quantity, 100);
+    assert.equal(pack100CustomDelta.item.percent_remaining, 60);
+
+    const pack100CustomPct = await fetch(`${baseUrl}/api/items/${pack100Item.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'consume_partial', fraction: 0.1 })
+    }).then((r) => r.json());
+    assert.equal(pack100CustomPct.item.quantity, 50);
+    assert.equal(pack100CustomPct.item.initial_quantity, 100);
+    assert.equal(pack100CustomPct.item.percent_remaining, 50);
+
     // Dwie sztuki z tym samym niestandardowym EAN dodane błędnie jako quantity=1 -> edycja jednej naprawia katalog i drugą sztukę
     const sharedEan = '5909998887771';
     const eanBatchRes = await fetch(`${baseUrl}/api/items`, {

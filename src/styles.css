@@ -3415,3 +3415,72 @@ dialog.confirm-import-dialog {
   font-size: 0.875rem;
   color: var(--text-primary);
 }
+
+/* ============================================================================
+   Consume Custom Modal & Stacked Layer Polish
+   ============================================================================ */
+
+.chip-btn-more {
+  border-color: rgba(0, 122, 255, 0.35);
+  background: rgba(0, 122, 255, 0.1);
+  color: var(--accent-blue);
+}
+
+dialog.consume-custom-dialog {
+  max-height: min(86dvh, 600px);
+}
+
+dialog.confirm-dialog .confirm-sheet {
+  height: auto;
+  max-height: inherit;
+}
+
+@media (max-width: 767px) {
+  dialog.consume-custom-dialog {
+    max-height: min(86dvh, 600px);
+  }
+}
+
+.consume-custom-form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.consume-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.consume-input-wrap input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.consume-unit-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  min-height: 44px;
+  padding: 0 0.75rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-fill);
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.consume-presets-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.consume-will-delete {
+  color: var(--accent-red);
+}

@@ -30,6 +30,7 @@ interface ItemModalProps {
   ) => void;
   onRequestPrint: (serial: string, copies: number, itemName?: string) => void;
   onSelectSibling: (item: InventoryItem) => void;
+  onOpenCustomConsume: (item: InventoryItem) => void;
 }
 
 export function ItemModal({
@@ -45,7 +46,8 @@ export function ItemModal({
   onMoveLocation,
   onUpdateItem,
   onRequestPrint,
-  onSelectSibling
+  onSelectSibling,
+  onOpenCustomConsume
 }: ItemModalProps) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -335,6 +337,13 @@ export function ItemModal({
                           onClick={() => onConsumePartial(activeData.id, { delta: 1 })}
                         >
                           −1 jedn.
+                        </button>
+                        <button
+                          type="button"
+                          className="chip-btn chip-btn-more"
+                          onClick={() => onOpenCustomConsume(activeData)}
+                        >
+                          Inne
                         </button>
                       </div>
                     </div>

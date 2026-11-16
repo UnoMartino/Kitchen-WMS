@@ -1,6 +1,35 @@
 import { useEffect, useRef, RefObject } from 'react';
 import { InventoryItem } from '../types';
 
+const modalStack: HTMLDialogElement[] = [];
+
+function pushModalToStack(dialog: HTMLDialogElement) {
+  const existingIdx = modalStack.indexOf(dialog);
+  if (existingIdx !== -1) {
+    modalStack.splice(existingIdx, 1);
+  }
+  modalStack.push(dialog);
+}
+
+function removeModalFromStack(dialog: HTMLDialogElement) {
+  const idx = modalStack.indexOf(dialog);
+  if (idx !== -1) {
+    modalStack.splice(idx, 1);
+  }
+}
+
+function isTopModal(dialog: HTMLDialogElement): boolean {
+  for (let i = modalStack.length - 1; i >= 0; i--) {
+    const candidate = modalStack[i];
+    if (!candidate.isConnected || !candidate.open) {
+      modalStack.splice(i, 1);
+      continue;
+    }
+    return candidate === dialog;
+  }
+  return true;
+}
+
 let supportsDisplayTransition: boolean | undefined;
 
 function canTransitionDisplay(): boolean {
@@ -64,11 +93,14 @@ export function useDialogModal(
 
     if (isOpen) {
       dialog.removeAttribute('data-closing');
+      pushModalToStack(dialog);
       if (!dialog.open) {
         dialog.showModal();
       }
     } else if (dialog.open) {
       void closeDialogAnimated(dialog);
+    } else {
+      removeModalFromStack(dialog);
     }
   }, [isOpen, dialogRef]);
 
@@ -78,11 +110,14 @@ export function useDialogModal(
 
     const handleNativeClose = () => {
       dialog.removeAttribute('data-closing');
+      removeModalFromStack(dialog);
       onCloseRef.current();
     };
 
     const handleCancel = (event: Event) => {
       event.preventDefault();
+      event.stopPropagation();
+      if (!isTopModal(dialog) || dialog.hasAttribute('data-closing')) return;
       void closeDialogAnimated(dialog);
     };
 
@@ -104,11 +139,23 @@ export function useDialogModal(
       };
       let pressedOutside = false;
       handlePointerDown = (event: PointerEvent) => {
+        if (!isTopModal(dialog) || dialog.hasAttribute('data-closing')) {
+          pressedOutside = false;
+          return;
+        }
         pressedOutside = isOutside(event);
       };
       handlePointerUp = (event: PointerEvent) => {
+        if (!isTopModal(dialog) || dialog.hasAttribute('data-closing')) {
+          pressedOutside = false;
+          return;
+        }
         if (pressedOutside && isOutside(event)) {
+          pressedOutside = false;
+          event.stopPropagation();
           void closeDialogAnimated(dialog);
+        } else {
+          pressedOutside = false;
         }
       };
       dialog.addEventListener('pointerdown', handlePointerDown);
@@ -116,6 +163,7 @@ export function useDialogModal(
     }
 
     return () => {
+      removeModalFromStack(dialog);
       dialog.removeEventListener('close', handleNativeClose);
       dialog.removeEventListener('cancel', handleCancel);
       if (handlePointerDown) {
