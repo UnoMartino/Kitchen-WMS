@@ -11,6 +11,8 @@ interface SettingsModalProps {
   onTestPrinter: (printerConfig: Partial<AppSettings>) => Promise<void>;
   onRestoreActivity: (activityId: number) => Promise<void>;
   onReprintSerial: (serial: string, itemName?: string) => void;
+  onExportDatabase: () => Promise<void>;
+  onRequestImportFile: (file: File) => void;
 }
 
 export function SettingsModal({
@@ -21,14 +23,18 @@ export function SettingsModal({
   onSaveSettings,
   onTestPrinter,
   onRestoreActivity,
-  onReprintSerial
+  onReprintSerial,
+  onExportDatabase,
+  onRequestImportFile
 }: SettingsModalProps) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
   const titleId = useId();
   useDialogModal(dialogRef, isOpen, onClose);
 
   const [activeTab, setActiveTab] = useState<'general' | 'taxonomy' | 'history'>('general');
+  const [exportingDb, setExportingDb] = useState(false);
 
   const [printerUrl, setPrinterUrl] = useState('http://10.10.20.2:8769/print');
   const [qrMode, setQrMode] = useState<'serial' | 'url'>('serial');
@@ -158,6 +164,7 @@ export function SettingsModal({
         <div className="dialog-body" ref={bodyRef}>
           <div key={activeTab} className="dialog-tab-panel">
             {activeTab === 'general' && (
+              <>
               <form onSubmit={handleSaveAll} className="stacked-form">
                 <div className="field">
                   <label htmlFor={`${titleId}-printer`}>Adres API drukarki etykiet (POST JSON):</label>
@@ -249,6 +256,55 @@ export function SettingsModal({
                   </button>
                 </div>
               </form>
+
+              <div className="database-backup-box">
+                <h3>Kopia zapasowa bazy danych</h3>
+                <p className="field-hint">
+                  Eksportuj wszystkie produkty, katalog kodów EAN, lokalizacje, kategorie i historię do pliku JSON lub wczytaj zapisaną kopię.
+                </p>
+                <div className="settings-actions-row">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={exportingDb}
+                    onClick={async () => {
+                      setExportingDb(true);
+                      try {
+                        await onExportDatabase();
+                      } finally {
+                        setExportingDb(false);
+                      }
+                    }}
+                  >
+                    {exportingDb ? 'Eksportowanie...' : 'Eksportuj bazę danych'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => importInputRef.current?.click()}
+                  >
+                    Importuj bazę danych
+                  </button>
+                  <label htmlFor={`${titleId}-import-file`} className="visually-hidden">
+                    Wybierz plik kopii zapasowej bazy danych JSON
+                  </label>
+                  <input
+                    ref={importInputRef}
+                    id={`${titleId}-import-file`}
+                    type="file"
+                    accept=".json,application/json"
+                    className="visually-hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (file) {
+                        onRequestImportFile(file);
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+              </>
             )}
 
             {activeTab === 'taxonomy' && (

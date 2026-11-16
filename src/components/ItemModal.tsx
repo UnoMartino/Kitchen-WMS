@@ -18,15 +18,18 @@ interface ItemModalProps {
     patch: {
       name: string;
       brand: string;
+      ean: string;
       category: string;
       location: string;
       quantity: number;
+      initial_quantity: number;
       unit: string;
       expiry_date: string | null;
       notes: string;
     }
   ) => void;
   onRequestPrint: (serial: string, copies: number, itemName?: string) => void;
+  onSelectSibling: (item: InventoryItem) => void;
 }
 
 export function ItemModal({
@@ -41,7 +44,8 @@ export function ItemModal({
   onConsumePartial,
   onMoveLocation,
   onUpdateItem,
-  onRequestPrint
+  onRequestPrint,
+  onSelectSibling
 }: ItemModalProps) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -50,12 +54,16 @@ export function ItemModal({
 
   const [displayItem, setDisplayItem] = useState<InventoryItem | null>(item);
   const [activeTab, setActiveTab] = useState<'actions' | 'print' | 'edit'>('actions');
+  const [siblingsOpen, setSiblingsOpen] = useState(false);
   const [copies, setCopies] = useState(1);
   const [editName, setEditName] = useState('');
   const [editBrand, setEditBrand] = useState('');
+  const [editEan, setEditEan] = useState('');
   const [editCategory, setEditCategory] = useState('');
   const [editLocation, setEditLocation] = useState('');
   const [editQuantity, setEditQuantity] = useState('1');
+  const [editInitialQuantity, setEditInitialQuantity] = useState('1');
+  const [qtyManuallyEdited, setQtyManuallyEdited] = useState(false);
   const [editUnit, setEditUnit] = useState('szt.');
   const [editExpiry, setEditExpiry] = useState('');
   const [editNoExpiry, setEditNoExpiry] = useState(false);
@@ -67,9 +75,12 @@ export function ItemModal({
       setCopies(1);
       setEditName(item.name || '');
       setEditBrand(item.brand || '');
+      setEditEan(item.ean || '');
       setEditCategory(item.category || categories[0] || 'Inne');
       setEditLocation(item.location || locations[0] || 'Spiżarnia');
       setEditQuantity(String(item.quantity));
+      setEditInitialQuantity(String(Math.max(item.initial_quantity || 1, item.quantity || 1)));
+      setQtyManuallyEdited(false);
       setEditUnit(item.unit || 'szt.');
       setEditExpiry(item.expiry_date || '');
       setEditNoExpiry(!item.expiry_date);
@@ -80,6 +91,7 @@ export function ItemModal({
   useEffect(() => {
     if (isOpen) {
       setActiveTab('actions');
+      setSiblingsOpen(false);
     }
   }, [isOpen, item?.id]);
 
@@ -90,19 +102,63 @@ export function ItemModal({
   }, [activeTab]);
 
   const activeData = item ?? displayItem;
+  const siblings = activeData?.same_ean_items || [];
+  const siblingsCount = activeData?.same_ean_count ?? siblings.length;
   const badge = activeData
     ? getExpiryBadgeInfo(activeData)
     : { cls: 'pill-none', marker: '[—]', text: '' };
 
+  const handleEditQuantityChange = (val: string) => {
+    setQtyManuallyEdited(true);
+    setEditQuantity(val);
+    const parsedQty = parseFloat(val.replace(',', '.'));
+    const parsedInit = parseFloat(editInitialQuantity.replace(',', '.'));
+    if (
+      activeData &&
+      Number.isFinite(parsedQty) &&
+      parsedQty > 0 &&
+      (activeData.quantity === activeData.initial_quantity ||
+        !Number.isFinite(parsedInit) ||
+        parsedQty > parsedInit ||
+        parsedInit <= 1)
+    ) {
+      setEditInitialQuantity(val);
+    }
+  };
+
+  const handleEditInitialQuantityChange = (val: string) => {
+    setEditInitialQuantity(val);
+    const nextInit = parseFloat(val.replace(',', '.'));
+    if (
+      activeData &&
+      !qtyManuallyEdited &&
+      activeData.initial_quantity <= 1 &&
+      activeData.quantity > 0 &&
+      activeData.quantity <= 1 &&
+      Number.isFinite(nextInit) &&
+      nextInit > 1
+    ) {
+      const scaled = Math.round(activeData.quantity * nextInit * 100) / 100;
+      setEditQuantity(String(scaled));
+    }
+  };
+
   const handleEditSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeData) return;
+    const parsedQty = Math.max(0.01, parseFloat(editQuantity.replace(',', '.')) || 1);
+    const parsedInit = Math.max(
+      parsedQty,
+      parseFloat(editInitialQuantity.replace(',', '.')) || parsedQty
+    );
     onUpdateItem(activeData.id, {
       name: editName.trim(),
       brand: editBrand.trim(),
+      ean: editEan.replace(/\D/g, '').trim(),
       category: editCategory,
       location: editLocation,
-      quantity: parseFloat(editQuantity.replace(',', '.')) || 1,
+      quantity: parsedQty,
+      initial_quantity: parsedInit,
       unit: editUnit,
       expiry_date: editNoExpiry ? null : editExpiry || null,
       notes: editNotes.trim()
@@ -160,9 +216,60 @@ export function ItemModal({
                           <span className="meta-tag">Zamknięte</span>
                         )}
                         {activeData.ean && <span className="meta-tag">EAN: {activeData.ean}</span>}
+                        {activeData.ean &&
+                          (siblings.length > 0 ? (
+                            <button
+                              type="button"
+                              className={`meta-tag tag-siblings-btn ${siblingsOpen ? 'active' : ''}`}
+                              aria-expanded={siblingsOpen}
+                              aria-controls={`${titleId}-siblings-list`}
+                              onClick={() => setSiblingsOpen((prev) => !prev)}
+                            >
+                              Inne sztuki: {siblingsCount} {siblingsOpen ? '▴' : '▾'}
+                            </button>
+                          ) : (
+                            <span className="meta-tag">Inne sztuki: 0</span>
+                          ))}
                       </div>
                     </div>
                   </div>
+
+                  {siblingsOpen && siblings.length > 0 && (
+                    <div id={`${titleId}-siblings-list`} className="same-ean-list-box">
+                      <div className="same-ean-list-title">
+                        Pozostałe sztuki tego produktu w magazynie ({siblings.length})
+                      </div>
+                      <div className="same-ean-list">
+                        {siblings.map((sib) => {
+                          const sibBadge = getExpiryBadgeInfo(sib);
+                          return (
+                            <button
+                              key={sib.id}
+                              type="button"
+                              className="sibling-item-row"
+                              onClick={() => onSelectSibling(sib)}
+                            >
+                              <div className="sibling-row-top">
+                                <span className="serial-chip">{sib.serial_number}</span>
+                                <span className={`expiry-pill ${sibBadge.cls}`}>
+                                  <span aria-hidden="true">{sibBadge.marker}</span>
+                                  <span>{sibBadge.text}</span>
+                                </span>
+                              </div>
+                              <div className="sibling-row-meta">
+                                <span>
+                                  {sib.location}
+                                  {sib.is_opened ? ' • Otwarte' : ''} • {sib.quantity}/
+                                  {sib.initial_quantity} {sib.unit}
+                                </span>
+                                <span>{sib.expiry_date || 'Bez terminu'} • Otwórz →</span>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
 
                   <div className="quantity-meter-box">
                     <div className="quantity-meter-header">
@@ -172,18 +279,18 @@ export function ItemModal({
                         {activeData.percent_remaining}%)
                       </strong>
                     </div>
-                    <div
-                      className="progress-track"
-                      role="progressbar"
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={activeData.percent_remaining}
-                    >
-                      <div
-                        className="progress-fill"
-                        style={{ width: `${activeData.percent_remaining}%` }}
-                      />
-                    </div>
+                    <progress
+                      className={`consumption-progress ${
+                        activeData.percent_remaining <= 25
+                          ? 'low'
+                          : activeData.percent_remaining <= 50
+                            ? 'medium'
+                            : ''
+                      }`}
+                      value={activeData.percent_remaining}
+                      max={100}
+                      aria-label={`Pozostała ilość: ${activeData.percent_remaining}%`}
+                    />
                   </div>
 
                   <div className="quick-actions-section">
@@ -380,10 +487,24 @@ export function ItemModal({
                         inputMode="decimal"
                         id={`${titleId}-qty`}
                         value={editQuantity}
-                        onChange={(e) => setEditQuantity(e.target.value)}
+                        onChange={(e) => handleEditQuantityChange(e.target.value)}
                         required
                       />
                     </div>
+                    <div className="field">
+                      <label htmlFor={`${titleId}-init-qty`}>Wielkość opakowania</label>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        id={`${titleId}-init-qty`}
+                        value={editInitialQuantity}
+                        onChange={(e) => handleEditInitialQuantityChange(e.target.value)}
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="form-row-2">
                     <div className="field">
                       <label htmlFor={`${titleId}-unit`}>Jednostka</label>
                       <select
@@ -401,6 +522,18 @@ export function ItemModal({
                         <option value="puszka">puszka</option>
                         <option value="porcje">porcje</option>
                       </select>
+                    </div>
+                    <div className="field">
+                      <label htmlFor={`${titleId}-ean`}>Kod EAN</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        id={`${titleId}-ean`}
+                        placeholder="opcjonalnie 8–14 cyfr"
+                        value={editEan}
+                        onChange={(e) => setEditEan(e.target.value)}
+                        autoComplete="off"
+                      />
                     </div>
                   </div>
 

@@ -29,6 +29,8 @@ export interface InventoryItem {
   created_at: string;
   updated_at: string;
   qr_svg?: string;
+  same_ean_count?: number;
+  same_ean_items?: InventoryItem[];
 }
 
 export interface StatsResponse {

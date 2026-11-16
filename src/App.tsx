@@ -29,6 +29,12 @@ import {
   ConfirmPrintModal,
   type PrintConfirmationRequest,
 } from './components/ConfirmPrintModal';
+import {
+  ConfirmImportModal,
+  type DatabaseBackupPayload,
+  type DatabaseImportMode,
+  type DatabaseImportRequest,
+} from './components/ConfirmImportModal';
 
 const DEFAULT_LOCATIONS = ['Lodówka', 'Zamrażarka', 'Spiżarnia', 'Szafka', 'Piwnica'];
 const DEFAULT_CATEGORIES = [
@@ -120,6 +126,8 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirmPrintRequest, setConfirmPrintRequest] =
     useState<PrintConfirmationRequest | null>(null);
+  const [confirmImportRequest, setConfirmImportRequest] =
+    useState<DatabaseImportRequest | null>(null);
 
   // Scanner state
   const [cameraActive, setCameraActive] = useState(false);
@@ -287,7 +295,11 @@ export function App() {
     }
   }, []);
 
+  const fetchItemsSeqRef = useRef(0);
+  const openItemSeqRef = useRef(0);
+
   const fetchItems = useCallback(async () => {
+    const reqSeq = ++fetchItemsSeqRef.current;
     try {
       const params = new URLSearchParams();
       if (searchQuery.trim()) params.set('q', searchQuery.trim());
@@ -299,6 +311,7 @@ export function App() {
       const res = await fetch(`/api/items?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
+        if (reqSeq !== fetchItemsSeqRef.current) return;
         setItems(data.items || []);
       }
     } catch {
@@ -370,20 +383,40 @@ export function App() {
     }
   }, [categories, addCategory]);
 
-  // Open an item modal and load its QR SVG
+  // Open an item modal and load its QR SVG + fresh siblings
   const openItemModal = useCallback(async (item: InventoryItem) => {
+    const seq = ++openItemSeqRef.current;
     setActiveItem(item);
     if (item.qr_svg) {
       setActiveItemQrSvg(item.qr_svg);
-    } else {
+    }
+    try {
+      const res = await fetch(`/api/items/by-serial/${encodeURIComponent(item.serial_number)}`);
+      if (seq !== openItemSeqRef.current) return;
+      if (res.ok) {
+        const data = await res.json();
+        if (seq !== openItemSeqRef.current) return;
+        if (data.found && data.item) {
+          setActiveItem(data.item);
+        }
+        setActiveItemQrSvg(data.qr_svg || '');
+        return;
+      }
+    } catch {
+      // ignore and fall back to QR endpoint if needed
+    }
+    if (!item.qr_svg) {
       try {
         const res = await fetch(`/api/qr/${encodeURIComponent(item.serial_number)}`);
+        if (seq !== openItemSeqRef.current) return;
         if (res.ok) {
           const data = await res.json();
           setActiveItemQrSvg(data.qr_svg || '');
         }
       } catch {
-        setActiveItemQrSvg('');
+        if (seq === openItemSeqRef.current) {
+          setActiveItemQrSvg('');
+        }
       }
     }
   }, []);
@@ -939,9 +972,11 @@ export function App() {
     patch: {
       name: string;
       brand: string;
+      ean: string;
       category: string;
       location: string;
       quantity: number;
+      initial_quantity: number;
       unit: string;
       expiry_date: string | null;
       notes: string;
@@ -1096,6 +1131,99 @@ export function App() {
     await executeReprintSingle('AAA-0001', 1);
   };
 
+  const handleExportDatabase = async () => {
+    try {
+      const res = await fetch('/api/database/export');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        showToast(errData.error || 'Nie udało się wyeksportować bazy danych.');
+        return;
+      }
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const filenameMatch = disposition.match(/filename="([^"]+)"/i);
+      const fallbackDate = new Date().toISOString().slice(0, 10);
+      const filename = filenameMatch ? filenameMatch[1] : `spizarnia-baza-${fallbackDate}.json`;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast(`Wyeksportowano bazę danych (${filename})`);
+    } catch {
+      showToast('Błąd połączenia podczas eksportu bazy danych.');
+    }
+  };
+
+  const handleSelectImportFile = async (file: File) => {
+    try {
+      const rawText = await file.text();
+      const parsed = JSON.parse(rawText) as DatabaseBackupPayload;
+      if (
+        !parsed ||
+        typeof parsed !== 'object' ||
+        (parsed.format && parsed.format !== 'kitchen-wms-backup') ||
+        !parsed.data ||
+        !Array.isArray(parsed.data.inventory_items)
+      ) {
+        showToast('Wybrany plik nie jest prawidłową kopią bazy danych Spiżarnia.');
+        return;
+      }
+      setConfirmImportRequest({
+        fileName: file.name,
+        payload: parsed,
+      });
+    } catch {
+      showToast('Nie udało się odczytać pliku JSON kopii zapasowej.');
+    }
+  };
+
+  const handleConfirmImportDatabase = async (
+    payload: DatabaseBackupPayload,
+    mode: DatabaseImportMode
+  ) => {
+    try {
+      const res = await fetch('/api/database/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, backup: payload }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(data.error || 'Nie udało się zaimportować bazy danych.');
+        return;
+      }
+      const updated: AppSettings | undefined = data.settings;
+      if (updated) {
+        setSettings(updated);
+        if (Array.isArray(updated.locations) && updated.locations.length > 0) {
+          setLocations(updated.locations);
+        }
+        if (Array.isArray(updated.categories) && updated.categories.length > 0) {
+          setCategories(updated.categories);
+        }
+        setAddAutoPrint(updated.printer_auto_print !== 'false');
+      }
+      setConfirmImportRequest(null);
+      refreshAll();
+      fetchActivity();
+      const importedCount = data.stats?.inventory_imported ?? 0;
+      const renamedCount = data.stats?.inventory_renamed ?? 0;
+      showToast(
+        mode === 'replace'
+          ? `Odtworzono bazę danych (${importedCount} produktów)`
+          : renamedCount > 0
+            ? `Scalono bazę (+${importedCount} produktów, ${renamedCount} z nowym numerem QR)`
+            : `Scalono bazę danych (+${importedCount} produktów)`
+      );
+    } catch {
+      showToast('Błąd połączenia podczas importu bazy danych.');
+    }
+  };
+
   const expiringBadgeCount = stats.attention_count || 0;
 
   const renderItemCard = (item: InventoryItem) => {
@@ -1128,6 +1256,29 @@ export function App() {
             <span>{badge.text}</span>
           </span>
         </div>
+
+        {(item.is_opened || item.percent_remaining < 100) && (
+          <div className="item-card-consumption">
+            <div className="item-card-consumption-header">
+              <span>
+                Pozostało: {item.quantity} / {item.initial_quantity} {item.unit}
+              </span>
+              <strong>{item.percent_remaining}%</strong>
+            </div>
+            <progress
+              className={`consumption-progress ${
+                item.percent_remaining <= 25
+                  ? 'low'
+                  : item.percent_remaining <= 50
+                    ? 'medium'
+                    : ''
+              }`}
+              value={item.percent_remaining}
+              max={100}
+              aria-label={`Pozostało ${item.percent_remaining}% produktu ${item.name}`}
+            />
+          </div>
+        )}
       </article>
     );
   };
@@ -1603,6 +1754,12 @@ export function App() {
                         placeholder="np. 5900512300108"
                         value={eanInput}
                         onChange={(e) => setEanInput(e.target.value)}
+                        onBlur={() => {
+                          const digits = eanInput.replace(/\D/g, '');
+                          if (digits.length >= 8 && digits.length <= 14 && !addName.trim()) {
+                            void lookupEanCode(digits);
+                          }
+                        }}
                         autoComplete="off"
                       />
                       <div className="ean-actions-grid">
@@ -1948,6 +2105,7 @@ export function App() {
         onMoveLocation={handleMoveLocation}
         onUpdateItem={handleUpdateItem}
         onRequestPrint={requestSinglePrintConfirm}
+        onSelectSibling={(sibling) => void openItemModal(sibling)}
       />
 
       <ReprintModal
@@ -1968,11 +2126,19 @@ export function App() {
         onTestPrinter={handleTestPrinter}
         onRestoreActivity={handleRestoreActivity}
         onReprintSerial={(serial, itemName) => requestSinglePrintConfirm(serial, 1, itemName)}
+        onExportDatabase={handleExportDatabase}
+        onRequestImportFile={handleSelectImportFile}
       />
 
       <ConfirmPrintModal
         request={confirmPrintRequest}
         onClose={() => setConfirmPrintRequest(null)}
+      />
+
+      <ConfirmImportModal
+        request={confirmImportRequest}
+        onConfirm={handleConfirmImportDatabase}
+        onClose={() => setConfirmImportRequest(null)}
       />
 
       {/* Toast Notification Region */}

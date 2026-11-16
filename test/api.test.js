@@ -240,6 +240,242 @@ async function runTests() {
     assert.equal(noExpiryRes.items[0].days_remaining, null);
     assert.equal(noExpiryRes.items[0].expiry_status, 'none');
 
+    console.log('8b. Testowanie wyszukiwarki PL, wielkości opakowań po EAN i powiązanych sztuk...');
+    const fusilliRes = await fetch(`${baseUrl}/api/items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Makaron Świderki (Fusilli)',
+        brand: 'Lubella',
+        ean: '5900073010119',
+        category: 'Suche i sypkie',
+        location: 'Spiżarnia',
+        quantity: 400,
+        unit: 'g',
+        auto_print: false
+      })
+    }).then((r) => r.json());
+    assert.equal(fusilliRes.ok, true);
+
+    const mayoRes = await fetch(`${baseUrl}/api/items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Majonez Kielecki',
+        brand: 'Społem',
+        ean: '5900783000059',
+        category: 'Przyprawy i sosy',
+        location: 'Lodówka',
+        quantity: 310,
+        unit: 'g',
+        ingredients_text: 'olej rzepakowy, woda, żółtko jaja, gorczyca',
+        auto_print: false
+      })
+    }).then((r) => r.json());
+    assert.equal(mayoRes.ok, true);
+
+    // Wyszukiwanie z polskimi znakami i bez znaków diakrytycznych
+    const searchLacPl = await fetch(`${baseUrl}/api/items?q=${encodeURIComponent('łaciate')}`).then((r) => r.json());
+    assert.ok(searchLacPl.items.some((it) => it.serial_number === 'AAA-0001'));
+
+    const searchLacAscii = await fetch(`${baseUrl}/api/items?q=${encodeURIComponent('laciate')}`).then((r) => r.json());
+    assert.ok(searchLacAscii.items.some((it) => it.serial_number === 'AAA-0001'));
+
+    const searchSwiderkiPl = await fetch(`${baseUrl}/api/items?q=${encodeURIComponent('świderki')}`).then((r) => r.json());
+    assert.ok(searchSwiderkiPl.items.some((it) => it.name.includes('Świderki')));
+
+    const searchSwiderkiAscii = await fetch(`${baseUrl}/api/items?q=${encodeURIComponent('swiderki')}`).then((r) => r.json());
+    assert.ok(searchSwiderkiAscii.items.some((it) => it.name.includes('Świderki')));
+
+    // Brak fałszywych dopasowań ze składników (ingredients_text) oraz pojedynczych cyfr jako AAA-0002
+    const searchIngredient = await fetch(`${baseUrl}/api/items?q=${encodeURIComponent('gorczyca')}`).then((r) => r.json());
+    assert.equal(searchIngredient.items.length, 0);
+
+    const searchDigitTwo = await fetch(`${baseUrl}/api/items?q=2`).then((r) => r.json());
+    assert.ok(!searchDigitTwo.items.some((it) => it.serial_number === 'AAA-0002'));
+
+    // Testowanie częściowego zużycia -25% z 100 g -> 75 / 100 g oraz naprawy opakowań EAN
+    const pack100Res = await fetch(`${baseUrl}/api/items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Przyprawa testowa 100g',
+        category: 'Przyprawy',
+        location: 'Spiżarnia',
+        quantity: 100,
+        unit: 'g',
+        auto_print: false
+      })
+    }).then((r) => r.json());
+    assert.equal(pack100Res.ok, true);
+    const pack100Item = pack100Res.items[0];
+    const pack100Consume = await fetch(`${baseUrl}/api/items/${pack100Item.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'consume_partial', fraction: 0.25 })
+    }).then((r) => r.json());
+    assert.equal(pack100Consume.item.quantity, 75);
+    assert.equal(pack100Consume.item.initial_quantity, 100);
+    assert.equal(pack100Consume.item.percent_remaining, 75);
+
+    // Dwie sztuki z tym samym niestandardowym EAN dodane błędnie jako quantity=1 -> edycja jednej naprawia katalog i drugą sztukę
+    const sharedEan = '5909998887771';
+    const eanBatchRes = await fetch(`${baseUrl}/api/items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Kasza gryczana testowa',
+        ean: sharedEan,
+        category: 'Suche i sypkie',
+        location: 'Spiżarnia',
+        quantity: 1,
+        unit: 'g',
+        batch_count: 2,
+        auto_print: false
+      })
+    }).then((r) => r.json());
+    assert.equal(eanBatchRes.count, 2);
+    const [firstEanItem, secondEanItem] = eanBatchRes.items;
+    assert.equal(firstEanItem.same_ean_count, 1);
+    assert.equal(firstEanItem.same_ean_items.length, 1);
+
+    const editedFirst = await fetch(`${baseUrl}/api/items/${firstEanItem.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        quantity: 75,
+        initial_quantity: 100,
+        unit: 'g'
+      })
+    }).then((r) => r.json());
+    assert.equal(editedFirst.ok, true);
+    assert.equal(editedFirst.item.quantity, 75);
+    assert.equal(editedFirst.item.initial_quantity, 100);
+    assert.equal(editedFirst.item.percent_remaining, 75);
+
+    // Druga sztuka tego samego EAN powinna zostać automatycznie przeskalowana do 100 / 100 g
+    const secondLookup = await fetch(
+      `${baseUrl}/api/items/by-serial/${encodeURIComponent(secondEanItem.serial_number)}`
+    ).then((r) => r.json());
+    assert.equal(secondLookup.item.quantity, 100);
+    assert.equal(secondLookup.item.initial_quantity, 100);
+    assert.equal(secondLookup.item.same_ean_count, 1);
+
+    // Katalog EAN zapamiętał wielkość opakowania 100 g i auto-uzupełnia kolejną sztukę
+    const eanMeta = await fetch(`${baseUrl}/api/ean/${sharedEan}`).then((r) => r.json());
+    assert.equal(eanMeta.found, true);
+    assert.equal(eanMeta.product.default_quantity, 100);
+    assert.equal(eanMeta.product.default_unit, 'g');
+
+    const thirdEanRes = await fetch(`${baseUrl}/api/items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Kasza gryczana testowa',
+        ean: sharedEan,
+        category: 'Suche i sypkie',
+        location: 'Spiżarnia',
+        quantity: 1,
+        unit: 'szt.',
+        auto_print: false
+      })
+    }).then((r) => r.json());
+    assert.equal(thirdEanRes.items[0].quantity, 100);
+    assert.equal(thirdEanRes.items[0].initial_quantity, 100);
+    assert.equal(thirdEanRes.items[0].unit, 'g');
+    assert.equal(thirdEanRes.items[0].same_ean_count, 2);
+    assert.equal(thirdEanRes.items[0].same_ean_items.length, 2);
+    assert.ok(
+      thirdEanRes.items[0].same_ean_items.every((sib) => sib.id !== thirdEanRes.items[0].id)
+    );
+
+    console.log('8c. Testowanie eksportu i importu bazy danych (replace oraz merge)...');
+    const exportRes = await fetch(`${baseUrl}/api/database/export`);
+    assert.equal(exportRes.status, 200);
+    assert.match(
+      exportRes.headers.get('content-disposition') || '',
+      /attachment;\s*filename="spizarnia-baza-\d{4}-\d{2}-\d{2}\.json"/i
+    );
+    const exportedBackup = await exportRes.json();
+    assert.equal(exportedBackup.format, 'kitchen-wms-backup');
+    assert.equal(exportedBackup.version, 1);
+    assert.ok(exportedBackup.data.inventory_items.length >= 5);
+    assert.equal(exportedBackup.counts.inventory_items, exportedBackup.data.inventory_items.length);
+
+    // Nieprawidłowy format importu zwraca 400
+    const badImportRes = await fetch(`${baseUrl}/api/database/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'replace', backup: { format: 'invalid', data: {} } })
+    });
+    assert.equal(badImportRes.status, 400);
+
+    // Dodaj tymczasowy produkt i przetestuj import w trybie merge (z kolizją numeru i nową lokalizacją)
+    const tempAddRes = await fetch(`${baseUrl}/api/items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Tymczasowy produkt przed importem',
+        category: 'Inne',
+        location: 'Spiżarnia',
+        quantity: 2,
+        unit: 'szt.',
+        auto_print: false
+      })
+    }).then((r) => r.json());
+    const tempItem = tempAddRes.items[0];
+    const existingItemOne = exportedBackup.data.inventory_items[0];
+
+    const mergePayload = {
+      format: 'kitchen-wms-backup',
+      version: 1,
+      data: {
+        settings: [],
+        ean_catalog: [],
+        activity_log: [],
+        inventory_items: [
+          existingItemOne,
+          {
+            serial_number: tempItem.serial_number,
+            name: 'Produkt scalony z kolizją numeru',
+            category: 'Inne',
+            location: 'Piwniczka',
+            quantity: 3,
+            initial_quantity: 3,
+            unit: 'szt.'
+          }
+        ]
+      }
+    };
+    const mergeRes = await fetch(`${baseUrl}/api/database/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'merge', backup: mergePayload })
+    }).then((r) => r.json());
+    assert.equal(mergeRes.ok, true);
+    assert.equal(mergeRes.stats.inventory_skipped, 1);
+    assert.equal(mergeRes.stats.inventory_imported, 1);
+    assert.equal(mergeRes.stats.inventory_renamed, 1);
+    assert.ok(mergeRes.settings.locations.includes('Piwniczka'));
+
+    const afterMergeItems = await fetch(`${baseUrl}/api/items`).then((r) => r.json());
+    assert.ok(afterMergeItems.items.some((i) => i.name === 'Tymczasowy produkt przed importem'));
+    assert.ok(afterMergeItems.items.some((i) => i.name === 'Produkt scalony z kolizją numeru'));
+
+    // Pełne odtworzenie wyeksportowanego backupu w trybie replace
+    const replaceRes = await fetch(`${baseUrl}/api/database/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'replace', backup: exportedBackup })
+    }).then((r) => r.json());
+    assert.equal(replaceRes.ok, true);
+    assert.equal(replaceRes.stats.inventory_imported, exportedBackup.counts.inventory_items);
+    assert.ok(!replaceRes.settings.locations.includes('Piwniczka'));
+
+    const afterReplaceItems = await fetch(`${baseUrl}/api/items`).then((r) => r.json());
+    assert.equal(afterReplaceItems.items.length, exportedBackup.counts.inventory_items);
+    assert.ok(!afterReplaceItems.items.some((i) => i.name === 'Tymczasowy produkt przed importem'));
+
     console.log('9. Testowanie usunięcia zakładki/endpointu Składniki oraz serwowania frontendu Vite...');
     const removedIngredientsRes = await fetch(`${baseUrl}/api/ingredients/check`, {
       method: 'POST'

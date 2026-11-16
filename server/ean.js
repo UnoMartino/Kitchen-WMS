@@ -1,4 +1,4 @@
-const { getLocations, getCategories } = require('./db');
+const { getLocations, getCategories, normalizeSearchText } = require('./db');
 
 function normalizeEan(raw) {
   if (!raw) return '';
@@ -10,28 +10,56 @@ function isPolishEan(ean) {
   return clean.length === 13 && clean.startsWith('590');
 }
 
+function normalizeParsedQuantity(val, unit) {
+  let cleanVal = Number(val);
+  let cleanUnit = unit;
+  if (cleanUnit === 'cl') {
+    cleanVal = Math.round(cleanVal * 10 * 100) / 100;
+    cleanUnit = 'ml';
+  } else if (cleanUnit === 'kg' && cleanVal > 0 && cleanVal < 1) {
+    cleanVal = Math.round(cleanVal * 1000);
+    cleanUnit = 'g';
+  } else if (cleanUnit === 'l' && cleanVal > 0 && cleanVal < 1) {
+    cleanVal = Math.round(cleanVal * 1000);
+    cleanUnit = 'ml';
+  } else if (cleanUnit === 'szt') {
+    cleanUnit = 'szt.';
+  } else if (cleanUnit === 'opak') {
+    cleanUnit = 'opak.';
+  }
+  return { quantity: cleanVal, unit: cleanUnit };
+}
+
 function parseQuantityAndUnit(rawQuantity, productQuantity, productQuantityUnit) {
-  if (productQuantity && !Number.isNaN(Number(productQuantity))) {
-    const num = Number(productQuantity);
-    const u = normalizeUnit(productQuantityUnit || 'g');
-    return { quantity: num, unit: u };
+  if (typeof rawQuantity === 'string' && rawQuantity.trim()) {
+    const cleanRaw = rawQuantity.trim();
+    const multiMatch = cleanRaw.match(/\d+\s*[x×*]\s*(\d+(?:[.,]\d+)?)\s*(kg|g|ml|l|cl|szt|opak)\b/i);
+    if (multiMatch) {
+      const val = parseFloat(multiMatch[1].replace(',', '.'));
+      if (val > 0) {
+        return normalizeParsedQuantity(val, multiMatch[2].toLowerCase());
+      }
+    }
+
+    const match = cleanRaw.match(/(\d+(?:[.,]\d+)?)\s*(kg|g|ml|l|cl|szt|opak)\b/i);
+    if (match) {
+      const val = parseFloat(match[1].replace(',', '.'));
+      if (val > 0) {
+        return normalizeParsedQuantity(val, match[2].toLowerCase());
+      }
+    }
   }
 
-  if (typeof rawQuantity === 'string' && rawQuantity.trim()) {
-    const match = rawQuantity.trim().match(/(\d+(?:[.,]\d+)?)\s*(kg|g|ml|l|cl|szt|opak)/i);
-    if (match) {
-      let val = parseFloat(match[1].replace(',', '.'));
-      let unit = match[2].toLowerCase();
-      if (unit === 'cl') {
-        val = val * 10;
-        unit = 'ml';
-      } else if (unit === 'szt') {
-        unit = 'szt.';
-      } else if (unit === 'opak') {
-        unit = 'opak.';
-      }
-      return { quantity: val, unit };
-    }
+  if (
+    productQuantity !== undefined &&
+    productQuantity !== null &&
+    productQuantity !== '' &&
+    !Number.isNaN(Number(productQuantity)) &&
+    Number(productQuantity) > 0
+  ) {
+    const num = Number(productQuantity);
+    const u = productQuantityUnit ? normalizeUnit(productQuantityUnit) : num >= 5 ? 'g' : 'szt.';
+    return normalizeParsedQuantity(num, u);
   }
 
   return { quantity: 1, unit: 'szt.' };
@@ -231,13 +259,27 @@ function saveToEanCatalog(db, product) {
       brand = CASE WHEN excluded.brand != '' THEN excluded.brand ELSE ean_catalog.brand END,
       category = CASE WHEN excluded.category != '' THEN excluded.category ELSE ean_catalog.category END,
       default_location = CASE WHEN excluded.default_location != '' THEN excluded.default_location ELSE ean_catalog.default_location END,
-      default_quantity = CASE WHEN excluded.default_quantity > 0 THEN excluded.default_quantity ELSE ean_catalog.default_quantity END,
-      default_unit = CASE WHEN excluded.default_unit != '' THEN excluded.default_unit ELSE ean_catalog.default_unit END,
+      default_quantity = CASE
+        WHEN excluded.source = 'user' AND excluded.default_quantity > 0 THEN excluded.default_quantity
+        WHEN ean_catalog.source = 'user' AND ean_catalog.default_quantity > 1 AND excluded.default_quantity <= 1 THEN ean_catalog.default_quantity
+        WHEN excluded.default_quantity > 1 THEN excluded.default_quantity
+        WHEN ean_catalog.default_quantity > 0 THEN ean_catalog.default_quantity
+        ELSE 1
+      END,
+      default_unit = CASE
+        WHEN excluded.source = 'user' AND excluded.default_unit != '' THEN excluded.default_unit
+        WHEN ean_catalog.source = 'user' AND ean_catalog.default_quantity > 1 AND excluded.default_quantity <= 1 THEN ean_catalog.default_unit
+        WHEN excluded.default_unit != '' THEN excluded.default_unit
+        ELSE ean_catalog.default_unit
+      END,
       default_shelf_life_days = COALESCE(excluded.default_shelf_life_days, ean_catalog.default_shelf_life_days),
       ingredients_text = CASE WHEN excluded.ingredients_text != '' THEN excluded.ingredients_text ELSE ean_catalog.ingredients_text END,
       image_url = CASE WHEN excluded.image_url != '' THEN excluded.image_url ELSE ean_catalog.image_url END,
       nutriscore = CASE WHEN excluded.nutriscore != '' THEN excluded.nutriscore ELSE ean_catalog.nutriscore END,
-      source = excluded.source,
+      source = CASE
+        WHEN excluded.source = 'user' OR ean_catalog.source = 'user' THEN 'user'
+        ELSE excluded.source
+      END,
       updated_at = excluded.updated_at
   `);
 
@@ -259,20 +301,32 @@ function saveToEanCatalog(db, product) {
 }
 
 function searchLocalCatalog(db, query, limit = 15) {
+  const rows = db
+    .prepare(`
+      SELECT * FROM ean_catalog
+      ORDER BY
+        CASE WHEN ean LIKE '590%' THEN 0 ELSE 1 END,
+        updated_at DESC,
+        name ASC
+    `)
+    .all();
+
   if (!query || !query.trim()) {
-    return db.prepare(`SELECT * FROM ean_catalog ORDER BY updated_at DESC LIMIT ?`).all(limit);
+    return rows.slice(0, limit);
   }
-  const q = `%${query.trim().toLowerCase()}%`;
-  return db.prepare(`
-    SELECT * FROM ean_catalog
-    WHERE LOWER(name) LIKE ?
-       OR LOWER(brand) LIKE ?
-       OR ean LIKE ?
-    ORDER BY
-      CASE WHEN ean LIKE '590%' THEN 0 ELSE 1 END,
-      name ASC
-    LIMIT ?
-  `).all(q, q, q, limit);
+
+  const normQ = normalizeSearchText(query);
+  const tokens = normQ.split(' ').filter(Boolean);
+  if (tokens.length === 0) {
+    return rows.slice(0, limit);
+  }
+
+  return rows
+    .filter((row) => {
+      const hay = normalizeSearchText(`${row.name || ''} ${row.brand || ''} ${row.ean || ''}`);
+      return tokens.every((tok) => hay.includes(tok));
+    })
+    .slice(0, limit);
 }
 
 module.exports = {

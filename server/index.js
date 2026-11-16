@@ -16,7 +16,11 @@ const {
   peekNextSerial,
   getSettings,
   updateSettings,
-  logActivity
+  logActivity,
+  normalizeSearchText,
+  syncEanPackageSize,
+  exportDatabasePayload,
+  importDatabasePayload
 } = require('./db');
 const { lookupEan, saveToEanCatalog, searchLocalCatalog, normalizeEan } = require('./ean');
 const { buildPrintPayload, printLabel, generateQrSvg } = require('./printer');
@@ -80,11 +84,15 @@ function enrichItem(row, warningDays = 7, todayStr = getTodayDateString()) {
     else expiryStatus = 'ok';
   }
 
-  const initialQty = row.initial_quantity > 0 ? row.initial_quantity : row.quantity || 1;
-  const percentRemaining = Math.max(0, Math.min(100, Math.round((row.quantity / initialQty) * 100)));
+  const qty = Math.max(0, Number(row.quantity) || 0);
+  const rawInit = Number(row.initial_quantity) || 0;
+  const initialQty = rawInit >= qty && rawInit > 0 ? rawInit : Math.max(qty || 1, rawInit || 1);
+  const percentRemaining = Math.max(0, Math.min(100, Math.round((qty / initialQty) * 100)));
 
   return {
     ...row,
+    quantity: qty,
+    initial_quantity: initialQty,
     is_opened: Boolean(row.is_opened),
     effective_expiry_date: effectiveExpiry,
     opened_expiry_date: openedExpiry,
@@ -92,6 +100,108 @@ function enrichItem(row, warningDays = 7, todayStr = getTodayDateString()) {
     expiry_status: expiryStatus,
     percent_remaining: percentRemaining
   };
+}
+
+function attachSameEanSiblings(db, itemsOrItem, warningDays = 7, todayStr = getTodayDateString()) {
+  const isArray = Array.isArray(itemsOrItem);
+  const list = isArray ? itemsOrItem : itemsOrItem ? [itemsOrItem] : [];
+  if (list.length === 0) return isArray ? [] : null;
+
+  const targetEans = Array.from(
+    new Set(
+      list
+        .map((it) => normalizeEan(it && it.ean))
+        .filter((ean) => ean && ean.length >= 8)
+    )
+  );
+
+  const byEan = new Map();
+  if (targetEans.length > 0) {
+    const placeholders = targetEans.map(() => '?').join(', ');
+    const rows = db
+      .prepare(`
+        SELECT * FROM inventory_items
+        WHERE ean IN (${placeholders})
+        ORDER BY
+          CASE WHEN expiry_date IS NULL OR expiry_date = '' THEN 1 ELSE 0 END,
+          expiry_date ASC,
+          serial_number ASC
+      `)
+      .all(...targetEans);
+
+    for (const row of rows) {
+      const ean = normalizeEan(row.ean);
+      if (!byEan.has(ean)) byEan.set(ean, []);
+      byEan.get(ean).push(enrichItem(row, warningDays, todayStr));
+    }
+  }
+
+  for (const item of list) {
+    if (!item) continue;
+    const ean = normalizeEan(item.ean);
+    const group = ean && byEan.has(ean) ? byEan.get(ean) : [];
+    const siblings = group.filter((other) => other.id !== item.id);
+    item.same_ean_count = siblings.length;
+    item.same_ean_items = siblings;
+  }
+
+  return isArray ? list : list[0];
+}
+
+function computeItemSearchScore(item, normQ, tokens) {
+  if (!normQ || tokens.length === 0) return 1;
+
+  const normName = normalizeSearchText(item.name);
+  const normBrand = normalizeSearchText(item.brand);
+  const normSerial = normalizeSearchText(item.serial_number);
+  const normSerialCompact = normSerial.replace(/-/g, '');
+  const normEan = String(item.ean || '').toLowerCase().trim();
+  const normNotes = normalizeSearchText(item.notes);
+
+  const tokenMatchesIdentifier = (tok) => {
+    if (normSerial) {
+      if (normSerial === tok || normSerialCompact === tok) return true;
+      if (/[a-z-]/.test(tok) && (normSerial.includes(tok) || normSerialCompact.includes(tok))) {
+        return true;
+      }
+      if (/^\d{4}$/.test(tok) && normSerial.endsWith(tok)) {
+        return true;
+      }
+    }
+    if (normEan && /^\d{6,}$/.test(tok) && normEan.includes(tok)) {
+      return true;
+    }
+    return false;
+  };
+
+  const allMatch = tokens.every(
+    (tok) =>
+      normName.includes(tok) ||
+      normBrand.includes(tok) ||
+      tokenMatchesIdentifier(tok) ||
+      normNotes.includes(tok)
+  );
+  if (!allMatch) return 0;
+
+  const compactQ = normQ.replace(/[^a-z0-9]/g, '');
+  if (
+    (normSerial && (normSerial === normQ || (compactQ && normSerialCompact === compactQ))) ||
+    (normEan && compactQ && normEan === compactQ)
+  ) {
+    return 100;
+  }
+
+  if (normName.startsWith(normQ)) return 80;
+  if (normName.split(/\s+/).some((w) => w.startsWith(normQ))) return 70;
+  if (
+    normBrand &&
+    (normBrand.startsWith(normQ) || normBrand.split(/\s+/).some((w) => w.startsWith(normQ)))
+  ) {
+    return 60;
+  }
+  if (tokens.every((tok) => normName.includes(tok))) return 50;
+  if (tokens.every((tok) => normBrand.includes(tok) || tokenMatchesIdentifier(tok))) return 40;
+  return 20;
 }
 
 function sendJson(res, statusCode, data) {
@@ -103,13 +213,15 @@ function sendJson(res, statusCode, data) {
   res.end(body);
 }
 
-function parseJsonBody(req) {
+function parseJsonBody(req, maxBytes = 2 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let body = '';
     req.on('data', (chunk) => {
       body += chunk;
-      if (body.length > 2 * 1024 * 1024) {
-        reject(new Error('Payload too large'));
+      if (body.length > maxBytes) {
+        const err = new Error('Plik lub żądanie przekracza dopuszczalny rozmiar.');
+        err.statusCode = 413;
+        reject(err);
         req.destroy();
       }
     });
@@ -118,7 +230,9 @@ function parseJsonBody(req) {
       try {
         resolve(JSON.parse(body));
       } catch (_) {
-        reject(new Error('Invalid JSON body'));
+        const err = new Error('Nieprawidłowy format JSON.');
+        err.statusCode = 400;
+        reject(err);
       }
     });
     req.on('error', reject);
@@ -242,39 +356,25 @@ function createAppServer(customDbPath) {
           conditions.push(`category = ?`);
           params.push(category);
         }
-        if (q) {
-          const normalizedSerial = extractSerialNumber(q);
-          const qLike = `%${q.toLowerCase()}%`;
-          if (normalizedSerial) {
-            conditions.push(`(
-              UPPER(serial_number) = ?
-              OR LOWER(serial_number) LIKE ?
-              OR LOWER(name) LIKE ?
-              OR LOWER(brand) LIKE ?
-              OR ean LIKE ?
-              OR LOWER(category) LIKE ?
-              OR LOWER(notes) LIKE ?
-              OR LOWER(ingredients_text) LIKE ?
-            )`);
-            params.push(normalizedSerial, qLike, qLike, qLike, qLike, qLike, qLike, qLike);
-          } else {
-            conditions.push(`(
-              LOWER(serial_number) LIKE ?
-              OR LOWER(name) LIKE ?
-              OR LOWER(brand) LIKE ?
-              OR ean LIKE ?
-              OR LOWER(category) LIKE ?
-              OR LOWER(notes) LIKE ?
-              OR LOWER(ingredients_text) LIKE ?
-            )`);
-            params.push(qLike, qLike, qLike, qLike, qLike, qLike, qLike);
-          }
-        }
 
         const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
         const rows = db.prepare(`SELECT * FROM inventory_items ${whereClause}`).all(...params);
         const todayStr = getTodayDateString();
         let items = rows.map((r) => enrichItem(r, warningDays, todayStr));
+
+        const normQ = q ? normalizeSearchText(q) : '';
+        const tokens = normQ ? normQ.split(' ').filter(Boolean) : [];
+        const searchScores = new Map();
+        if (tokens.length > 0) {
+          items = items.filter((item) => {
+            const score = computeItemSearchScore(item, normQ, tokens);
+            if (score > 0) {
+              searchScores.set(item.id, score);
+              return true;
+            }
+            return false;
+          });
+        }
 
         if (status === 'expiring') {
           items = items.filter((i) => i.days_remaining !== null && i.days_remaining <= warningDays);
@@ -293,6 +393,10 @@ function createAppServer(customDbPath) {
         }
 
         items.sort((a, b) => {
+          if (tokens.length > 0) {
+            const scoreDiff = (searchScores.get(b.id) || 0) - (searchScores.get(a.id) || 0);
+            if (scoreDiff !== 0) return scoreDiff;
+          }
           if (sort === 'created_desc') {
             return b.created_at.localeCompare(a.created_at) || b.id - a.id;
           }
@@ -307,6 +411,8 @@ function createAppServer(customDbPath) {
           if (da !== dbVal) return da - dbVal;
           return a.name.localeCompare(b.name, 'pl');
         });
+
+        attachSameEanSiblings(db, items, warningDays, todayStr);
 
         return sendJson(res, 200, {
           items,
@@ -352,7 +458,7 @@ function createAppServer(customDbPath) {
 
         const settings = getSettings(db);
         const warningDays = parseInt(settings.expiry_warning_days || '7', 10) || 7;
-        const item = enrichItem(row, warningDays);
+        const item = attachSameEanSiblings(db, enrichItem(row, warningDays), warningDays);
         const printPayload = buildPrintPayload(db, item, getRequestOrigin(req));
         const qrSvg = await generateQrSvg(printPayload.qr_text);
 
@@ -379,9 +485,34 @@ function createAppServer(customDbPath) {
         const ean = normalizeEan(body.ean || '');
         const category = String(body.category || categories[0] || 'Inne').trim();
         const location = String(body.location || locations[0] || 'Spiżarnia').trim();
-        const quantity = Math.max(0.01, Number(body.quantity) || 1);
-        const initialQuantity = Math.max(quantity, Number(body.initial_quantity) || quantity);
-        const unit = String(body.unit || 'szt.').trim();
+        let quantity = Math.max(0.01, Number(body.quantity) || 1);
+        const hasExplicitPackageQty =
+          body.initial_quantity !== undefined &&
+          body.initial_quantity !== null &&
+          Number(body.initial_quantity) > 0;
+        let unit = String(body.unit || 'szt.').trim();
+        let initialQuantity = hasExplicitPackageQty
+          ? Math.max(quantity, Number(body.initial_quantity))
+          : quantity;
+
+        if (ean && ean.length >= 8 && !hasExplicitPackageQty) {
+          const catalogEntry = db
+            .prepare(`SELECT default_quantity, default_unit FROM ean_catalog WHERE ean = ?`)
+            .get(ean);
+          if (
+            catalogEntry &&
+            Number(catalogEntry.default_quantity) > 1 &&
+            quantity === 1 &&
+            (!body.unit || unit === 'szt.')
+          ) {
+            quantity = Number(catalogEntry.default_quantity);
+            initialQuantity = quantity;
+            if (catalogEntry.default_unit) {
+              unit = String(catalogEntry.default_unit).trim();
+            }
+          }
+        }
+
         const expiryDate = body.expiry_date ? String(body.expiry_date).trim() : null;
         const isOpened = body.is_opened ? 1 : 0;
         const openedAt = isOpened ? new Date().toISOString() : null;
@@ -404,12 +535,15 @@ function createAppServer(customDbPath) {
             brand,
             category,
             default_location: location,
-            default_quantity: quantity,
+            default_quantity: initialQuantity,
             default_unit: unit,
             ingredients_text: ingredientsText,
             image_url: imageUrl,
             source: 'user'
           });
+          if (initialQuantity > 1) {
+            syncEanPackageSize(db, ean, initialQuantity, unit);
+          }
         }
 
         const now = new Date().toISOString();
@@ -487,6 +621,8 @@ function createAppServer(customDbPath) {
           });
         }
 
+        attachSameEanSiblings(db, enrichedItems, warningDays);
+
         return sendJson(res, 201, {
           ok: true,
           count: enrichedItems.length,
@@ -532,7 +668,10 @@ function createAppServer(customDbPath) {
           logActivity(db, 'opened', existing.serial_number, existing.name, {});
 
           const updated = db.prepare(`SELECT * FROM inventory_items WHERE id = ?`).get(existing.id);
-          return sendJson(res, 200, { ok: true, item: enrichItem(updated, warningDays) });
+          return sendJson(res, 200, {
+            ok: true,
+            item: attachSameEanSiblings(db, enrichItem(updated, warningDays), warningDays)
+          });
         }
 
         if (body.action === 'close') {
@@ -545,16 +684,37 @@ function createAppServer(customDbPath) {
           logActivity(db, 'closed', existing.serial_number, existing.name, {});
 
           const updated = db.prepare(`SELECT * FROM inventory_items WHERE id = ?`).get(existing.id);
-          return sendJson(res, 200, { ok: true, item: enrichItem(updated, warningDays) });
+          return sendJson(res, 200, {
+            ok: true,
+            item: attachSameEanSiblings(db, enrichItem(updated, warningDays), warningDays)
+          });
         }
 
         if (body.action === 'consume_partial') {
-          let newQty = existing.quantity;
+          let baseInitial = Math.max(
+            Number(existing.initial_quantity) || 0,
+            Number(existing.quantity) || 1
+          );
+          if (existing.ean && baseInitial <= 1) {
+            const catRow = db
+              .prepare(`SELECT default_quantity FROM ean_catalog WHERE ean = ?`)
+              .get(normalizeEan(existing.ean));
+            if (catRow && Number(catRow.default_quantity) > baseInitial) {
+              baseInitial = Number(catRow.default_quantity);
+            }
+          }
+
+          let currentQty = Number(existing.quantity) || 0;
+          if (currentQty <= 1 && baseInitial > 1 && Number(existing.initial_quantity) <= 1) {
+            currentQty = Math.round(currentQty * baseInitial * 100) / 100;
+          }
+
+          let newQty = currentQty;
           if (body.fraction) {
-            const delta = existing.initial_quantity * Number(body.fraction);
-            newQty = Math.round((existing.quantity - delta) * 100) / 100;
+            const delta = baseInitial * Number(body.fraction);
+            newQty = Math.round((currentQty - delta) * 100) / 100;
           } else if (body.delta !== undefined) {
-            newQty = Math.round((existing.quantity - Number(body.delta)) * 100) / 100;
+            newQty = Math.round((currentQty - Number(body.delta)) * 100) / 100;
           } else if (body.quantity !== undefined) {
             newQty = Number(body.quantity);
           }
@@ -586,9 +746,9 @@ function createAppServer(customDbPath) {
 
           db.prepare(`
             UPDATE inventory_items
-            SET quantity = ?, is_opened = ?, opened_at = ?, updated_at = ?
+            SET quantity = ?, initial_quantity = ?, is_opened = ?, opened_at = ?, updated_at = ?
             WHERE id = ?
-          `).run(newQty, markOpened, openedAt, now, existing.id);
+          `).run(newQty, Math.max(baseInitial, newQty), markOpened, openedAt, now, existing.id);
 
           logActivity(db, 'updated', existing.serial_number, existing.name, {
             previous_quantity: existing.quantity,
@@ -597,7 +757,31 @@ function createAppServer(customDbPath) {
           });
 
           const updated = db.prepare(`SELECT * FROM inventory_items WHERE id = ?`).get(existing.id);
-          return sendJson(res, 200, { ok: true, item: enrichItem(updated, warningDays) });
+          return sendJson(res, 200, {
+            ok: true,
+            item: attachSameEanSiblings(db, enrichItem(updated, warningDays), warningDays)
+          });
+        }
+
+        const nextQty =
+          body.quantity !== undefined ? Math.max(0.01, Number(body.quantity)) : existing.quantity;
+        let nextInitialQty = existing.initial_quantity;
+        if (body.initial_quantity !== undefined && Number(body.initial_quantity) > 0) {
+          nextInitialQty = Math.max(nextQty, Number(body.initial_quantity));
+        } else if (body.quantity !== undefined) {
+          const wasFullPackage =
+            !existing.is_opened && existing.quantity === existing.initial_quantity;
+          if (
+            nextQty > existing.initial_quantity ||
+            existing.initial_quantity <= 1 ||
+            wasFullPackage
+          ) {
+            nextInitialQty = nextQty;
+          } else {
+            nextInitialQty = Math.max(nextQty, existing.initial_quantity);
+          }
+        } else {
+          nextInitialQty = Math.max(nextQty, existing.initial_quantity);
         }
 
         const updatedFields = {
@@ -606,11 +790,8 @@ function createAppServer(customDbPath) {
           ean: body.ean !== undefined ? normalizeEan(body.ean) : existing.ean,
           category: body.category !== undefined ? String(body.category).trim() : existing.category,
           location: body.location !== undefined ? String(body.location).trim() : existing.location,
-          quantity: body.quantity !== undefined ? Math.max(0.01, Number(body.quantity)) : existing.quantity,
-          initial_quantity:
-            body.initial_quantity !== undefined
-              ? Math.max(0.01, Number(body.initial_quantity))
-              : existing.initial_quantity,
+          quantity: nextQty,
+          initial_quantity: nextInitialQty,
           unit: body.unit !== undefined ? String(body.unit).trim() : existing.unit,
           expiry_date:
             body.expiry_date !== undefined
@@ -665,15 +846,42 @@ function createAppServer(customDbPath) {
           existing.id
         );
 
+        if (updatedFields.ean && updatedFields.ean.length >= 8) {
+          saveToEanCatalog(db, {
+            ean: updatedFields.ean,
+            name: updatedFields.name,
+            brand: updatedFields.brand,
+            category: updatedFields.category,
+            default_location: updatedFields.location,
+            default_quantity: updatedFields.initial_quantity,
+            default_unit: updatedFields.unit,
+            ingredients_text: updatedFields.ingredients_text,
+            image_url: existing.image_url || '',
+            source: 'user'
+          });
+          if (updatedFields.initial_quantity > 1) {
+            syncEanPackageSize(
+              db,
+              updatedFields.ean,
+              updatedFields.initial_quantity,
+              updatedFields.unit
+            );
+          }
+        }
+
         logActivity(db, 'updated', existing.serial_number, updatedFields.name, {
           location: updatedFields.location,
           quantity: updatedFields.quantity,
+          initial_quantity: updatedFields.initial_quantity,
           unit: updatedFields.unit,
           expiry_date: updatedFields.expiry_date
         });
 
         const updated = db.prepare(`SELECT * FROM inventory_items WHERE id = ?`).get(existing.id);
-        return sendJson(res, 200, { ok: true, item: enrichItem(updated, warningDays) });
+        return sendJson(res, 200, {
+          ok: true,
+          item: attachSameEanSiblings(db, enrichItem(updated, warningDays), warningDays)
+        });
       }
 
       // Delete / consume item by ID or by serial
@@ -780,7 +988,7 @@ function createAppServer(customDbPath) {
           .get(snap.serial_number);
         return sendJson(res, 200, {
           ok: true,
-          item: enrichItem(restored),
+          item: attachSameEanSiblings(db, enrichItem(restored)),
           message: `Przywrócono ${snap.name} (${snap.serial_number}).`
         });
       }
@@ -1004,6 +1212,35 @@ function createAppServer(customDbPath) {
         return sendJson(res, 200, { activity: rows });
       }
 
+      // Database backup export (JSON)
+      if (pathname === '/api/database/export' && method === 'GET') {
+        const payload = exportDatabasePayload(db);
+        const todayStr = getTodayDateString();
+        const body = JSON.stringify(payload, null, 2);
+        res.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Content-Disposition': `attachment; filename="spizarnia-baza-${todayStr}.json"`,
+          'Cache-Control': 'no-store'
+        });
+        return res.end(body);
+      }
+
+      // Database backup import (JSON: replace or merge)
+      if (pathname === '/api/database/import' && method === 'POST') {
+        const body = await parseJsonBody(req, 20 * 1024 * 1024);
+        const queryMode = reqUrl.searchParams.get('mode');
+        const mode = (body && typeof body === 'object' && body.mode) || queryMode || 'replace';
+        const backupPayload =
+          body && typeof body === 'object' && body.backup !== undefined ? body.backup : body;
+        const stats = importDatabasePayload(db, backupPayload, { mode });
+        return sendJson(res, 200, {
+          ok: true,
+          stats,
+          settings: getSettings(db),
+          next_serial: peekNextSerial(db)
+        });
+      }
+
       // Serve built Vite SPA from dist/ (or public/ fallback)
       let relativePath = pathname === '/' ? '/index.html' : pathname;
       if (/^\/[A-Za-z]{3}-\d{4}$/.test(pathname)) {
@@ -1053,8 +1290,11 @@ function createAppServer(customDbPath) {
 
       return sendJson(res, 404, { error: 'Nie znaleziono zasobu.' });
     } catch (err) {
-      console.error('Server error:', err);
-      return sendJson(res, 500, { error: err.message || 'Wewnętrzny błąd serwera.' });
+      const status = err && err.statusCode ? err.statusCode : 500;
+      if (status >= 500) {
+        console.error('Server error:', err);
+      }
+      return sendJson(res, status, { error: err.message || 'Wewnętrzny błąd serwera.' });
     }
   });
 
